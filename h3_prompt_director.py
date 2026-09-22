@@ -53,7 +53,7 @@ def load_audio_dict(filename):
         print(f"[H3PromptDirector] File not found: {audio_path}")
         return None
     try:
-        # 💡 torchcodec 依存を完全回避して安定して WAV を読み込む
+        # torchcodec 依存を完全回避して安定して WAV を読み込む
         sample_rate, data = wavfile.read(audio_path)
         
         # 整数型(int16など)を float32 (-1.0 〜 1.0) に正規化
@@ -89,7 +89,6 @@ def load_audio_dict(filename):
             print(f"[H3PromptDirector] Audio load error: {e} / {e2}")
             return None
 
-# --- 万能リサイズ関数（node 253 ImageResizeKJv2 相当のエンジン） ---
 
 def universal_resize(tensor, target_w, target_h, mode="crop", crop_pos="center"):
     if tensor is None:
@@ -366,7 +365,6 @@ Music: {BGM}
 """
         prompt_result = self.generate_llm_prompt(provider, api_key, model_name, system_instruction)
 
-        # 💡 Shot 1〜4 までの全セリフを完全強制上書き（改行・空白を無視して100%復元）
         orig_dialogues = re.findall(r'<d>\[Japanese\]\s*(.*?)\s*<\/d>', 時間軸の動き, re.DOTALL)
         if orig_dialogues:
             dialogue_queue = [d.strip() for d in orig_dialogues if d.strip()]
@@ -376,7 +374,6 @@ Music: {BGM}
                 return match.group(0)
             prompt_result = re.sub(r'<d>\[Japanese\]\s*.*?\s*<\/d>', replace_in_order, prompt_result, flags=re.DOTALL)
 
-        # --- Python側での自動クリーニング（安全装置） ---
         prompt_result = re.sub(r'"<([^>]+)>"', r'"\1"', prompt_result)
         prompt_result = re.sub(r'("[\u3040-\u30ff\u4e00-\u9fff][^"\n]*")\s*[-–—]\s*"[^"\n]*"', r'\1', prompt_result)
         prompt_result = re.sub(r'("[\u3040-\u30ff\u4e00-\u9fff][^"\n]*")\s*[-–—]\s*[A-Za-z0-9\s,\.\'!?]+', r'\1', prompt_result)
@@ -590,7 +587,6 @@ class H3CharacterSubjectManager:
         subjects = []
 
         for i in range(1, 4):
-            # 新旧キー表記の両方に対応
             preset = kwargs.get(f"キャラ{i}_プリセット", kwargs.get(f"キャラ{i} プリセット", "None"))
             name = kwargs.get(f"キャラ{i}_名前/識別子", kwargs.get(f"キャラ{i} 名前", "")).strip()
             audio_ref = kwargs.get(f"キャラ{i}_音声リファレンス", kwargs.get(f"キャラ{i} 音声リファレンス", "None"))
@@ -682,7 +678,7 @@ class H3TimelineDirector:
             time_range = kwargs.get(f"ショット{i}_タイム (例: 0:00-0:03.0)", "").strip()
             action = kwargs.get(f"ショット{i}_アクション/構図", "").strip()
             
-            # 💡 FIX: ショット1のみ特殊なキー名になっているのを確実に拾う
+            # FIX: ショット1のみ特殊なキー名になっているのを確実に拾う
             if i == 1:
                 dialogue_raw = kwargs.get("ショット1_セリフ (例: S1: セリフ)", "").strip()
             else:
