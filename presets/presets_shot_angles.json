@@ -1,0 +1,26 @@
+{
+  "shots": {
+    "構図を選択...": "",
+    "全身": "full body",
+    "クローズアップ": "close-up",
+    "頭フレーム外": "crown of the head out of frame",
+    "ポートレート": "portrait",
+    "バストショット": "bust shot",
+    "アッパーボディ": "upper body",
+    "カウボーイショット": "cowboy shot",
+    "ローワーボディ": "lower body",
+    "横顔": "profile",
+    "ワイドショット": "wide shot"
+  },
+  "angles": {
+    "アングルを選択...": "",
+    "正面": "front view",
+    "上から": "from above",
+    "下から": "from below",
+    "斜め構図": "dynamic angle",
+    "ダッチアングル": "dutch angle",
+    "横から": "from side",
+    "横向き": "sideways",
+    "後ろから": "from behind"
+  }
+}

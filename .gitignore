@@ -1,0 +1,10 @@
+# characters フォルダ内の全txtファイルを除外
+characters/*.txt
+
+# anima_nem.txt のみ除外を解除してアップロード対象にする
+!characters/anima_nem.txt
+
+# Pythonキャッシュ等の除外
+__pycache__/
+*.pyc
+.DS_Store
