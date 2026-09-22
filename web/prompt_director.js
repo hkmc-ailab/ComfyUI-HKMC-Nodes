@@ -531,7 +531,7 @@ app.registerExtension({
             };
         }
 
-// --- 3. H3TimelineDirector の拡張 ---
+        // --- 3. H3TimelineDirector の拡張 ---
         if (nodeData.name === "H3TimelineDirector") {
             const origNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
