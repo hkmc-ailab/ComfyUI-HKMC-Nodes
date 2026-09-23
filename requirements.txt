@@ -2,3 +2,5 @@ google-generativeai
 openai
 requests
 aiohttp
+opencv-python
+scipy
