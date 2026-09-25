@@ -23,6 +23,15 @@ async def get_shot_angles(request):
     return web.json_response({})
 
 class AnimaPromptDirector:
+    DEFAULT_BACK_FILTER = [
+        "eye", "eyes", "pupil", "pupils", "iris", "eyeshadow", "eyelash", "eyelashes",
+        "mouth", "lip", "lips", "teeth", "tongue", "nose", "blush", "forehead",
+        "smile", "grin", "smirk", "frown", "expression", "looking at viewer", "looking away",
+        "bangs", "sidelocks",
+        "cleavage", "breast", "breasts", "navel", "collarbone", "collarbones",
+        "pendant", "necklace", "necktie", "bowtie", "brooch"
+    ]
+
     @classmethod
     def load_shot_angle_presets(cls):
         base_dir = os.path.join(os.path.dirname(__file__), "presets")
@@ -62,6 +71,36 @@ class AnimaPromptDirector:
             return default_data
 
     @classmethod
+    def load_back_view_filters(cls):
+        base_dir = os.path.join(os.path.dirname(__file__), "presets")
+        os.makedirs(base_dir, exist_ok=True)
+        txt_path = os.path.join(base_dir, "filter_back_view.txt")
+
+        if not os.path.exists(txt_path):
+            try:
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write("# 後ろ姿（Back View）モード時に自動除外するキーワード一覧\n")
+                    f.write("# 1行に1単語/フレーズを記述してください（#から始まる行はコメントです）\n\n")
+                    for word in cls.DEFAULT_BACK_FILTER:
+                        f.write(f"{word}\n")
+                print(f"[AnimaPromptDirector] Created default back-view filter: {txt_path}")
+            except Exception as e:
+                print(f"[AnimaPromptDirector] Failed to create filter file: {e}")
+                return cls.DEFAULT_BACK_FILTER
+
+        filter_words = []
+        try:
+            with open(txt_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line_s = line.strip()
+                    if line_s and not line_s.startswith("#"):
+                        filter_words.append(line_s.lower())
+            return filter_words if filter_words else cls.DEFAULT_BACK_FILTER
+        except Exception as e:
+            print(f"[AnimaPromptDirector] Error loading {txt_path}: {e}")
+            return cls.DEFAULT_BACK_FILTER
+
+    @classmethod
     def get_preset_files(cls, subfolder, prefix="Anima_"):
         base_dir = os.path.join(os.path.dirname(__file__), subfolder)
         os.makedirs(base_dir, exist_ok=True)
@@ -95,20 +134,22 @@ class AnimaPromptDirector:
             "required": {
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
-                "enable_positive": ("BOOLEAN", {"default": True, "label_on": "ON", "label_off": "OFF"}),
+                "enable_director": ("BOOLEAN", {"default": True, "label_on": "ON (有効)", "label_off": "OFF (バイパス)", "label": "Director機能"}),
                 "character_preset": (char_list, {"default": "None"}),
                 "part_head": ("BOOLEAN", {"default": True}),
                 "part_upper": ("BOOLEAN", {"default": True}),
                 "part_waist": ("BOOLEAN", {"default": True}),
                 "part_lower": ("BOOLEAN", {"default": True}),
                 "part_legs": ("BOOLEAN", {"default": True}),
+                # ★ ラベルを「完全な後ろ姿」に変更
+                "full_back_view": ("BOOLEAN", {"default": False, "label": "完全な後ろ姿"}),
                 "quality_prompt": ("STRING", {"multiline": True, "default": "__quality__, anime style, cel-shaded, crisp outlines"}),
                 "scene_prompt": ("STRING", {"multiline": True, "default": ""}),
                 
                 "llm_provider": (["None (Raw Tag)", "Gemini (Cloud)", "ChatGPT (OpenAI)", "Ollama (Local)"], {"default": "None (Raw Tag)", "label": "[LLM] プロバイダー"}),
                 "llm_api_key": ("STRING", {"default": "", "multiline": False, "label": "[LLM] API_Key"}),
                 "llm_model": ("STRING", {"default": "gemini-2.5-flash", "multiline": False, "label": "[LLM] モデル名"}),
-                "creative_mode": (["OFF (Strict)", "Subtle (Light/Atmosphere)", "Rich (Creative Props/Scene)"], {"default": "OFF (Strict)", "label": "[LLM] 演出/あそび"}),
+                "creative_mode": (["オフ", "控えめ (光・空気感)", "リッチ (小物・情景追加)"], {"default": "オフ", "label": "[LLM] 演出/あそび"}),
                 "convert_all_to_natural": ("BOOLEAN", {"default": False, "label_on": "ON", "label_off": "OFF", "label": "全て自然言語に変換"}),
                 
                 "enable_negative": ("BOOLEAN", {"default": True, "label_on": "ON", "label_off": "OFF"}),
@@ -120,11 +161,67 @@ class AnimaPromptDirector:
             }
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING", "CONDITIONING", "STRING", "STRING")
-    RETURN_NAMES = ("MODEL", "CLIP", "positive", "negative", "final_positive_text", "final_negative_text")
+    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING", "CONDITIONING", "STRING", "LLM_CONTEXT")
+    RETURN_NAMES = ("MODEL", "CLIP", "positive", "negative", "final_negative_text", "llm_context")
     OUTPUT_NODE = True
     FUNCTION = "direct_and_encode"
     CATEGORY = "Anima"
+
+    def filter_front_elements(self, text, is_back_view=False):
+        if not text:
+            return ""
+
+        if not is_back_view:
+            return re.sub(r'!(.*?)!', r'\1', text)
+
+        filter_words = self.load_back_view_filters()
+        tags = [t.strip() for t in text.split(',') if t.strip()]
+        filtered_tags = []
+
+        for tag in tags:
+            keep_match = re.match(r'^!(.*?)!$', tag)
+            if keep_match:
+                filtered_tags.append(keep_match.group(1).strip())
+                continue
+
+            tag_lower = tag.lower()
+            should_exclude = False
+            for fw in filter_words:
+                pattern = r'\b' + re.escape(fw) + r'\b'
+                if re.search(pattern, tag_lower):
+                    print(f"[AnimaPromptDirector] [Back-View Filter] Removed: '{tag}' (Matched: '{fw}')")
+                    should_exclude = True
+                    break
+
+            if not should_exclude:
+                filtered_tags.append(tag)
+
+        return ", ".join(filtered_tags)
+
+    def resolve_wildcards(self, text):
+        if not text:
+            return ""
+
+        presets_dir = os.path.join(os.path.dirname(__file__), "presets")
+
+        def replace_match(match):
+            filename = match.group(1).strip()
+            txt_path = os.path.join(presets_dir, f"{filename}.txt")
+            if os.path.exists(txt_path):
+                try:
+                    with open(txt_path, "r", encoding="utf-8") as f:
+                        lines = [line.strip() for line in f.readlines() if line.strip() and not line.strip().startswith("#")]
+                        loaded_text = ", ".join(lines)
+                        print(f"[AnimaPromptDirector] Loaded Wildcard: __{filename}__ from {txt_path}")
+                        return loaded_text
+                except Exception as e:
+                    print(f"[AnimaPromptDirector] Error loading wildcard file '{txt_path}': {e}")
+                    return match.group(0)
+            else:
+                print(f"[AnimaPromptDirector] Wildcard file not found: {txt_path}")
+                return match.group(0)
+
+        return re.sub(r'__([a-zA-Z0-9_\-\.\s]+)__', replace_match, text)
 
     def parse_character_file(self, preset_name):
         if preset_name == "None":
@@ -167,7 +264,7 @@ class AnimaPromptDirector:
 
         return {k: ", ".join(v) for k, v in sections.items()}
 
-    def call_llm(self, provider, api_key, model_name, user_text, convert_all=False, creative_mode="OFF (Strict)"):
+    def call_llm(self, provider, api_key, model_name, user_text, convert_all=False, creative_mode="オフ"):
         if provider == "None (Raw Tag)" or not user_text.strip():
             return user_text
 
@@ -189,15 +286,14 @@ class AnimaPromptDirector:
                 "She wears a fitted black ribbed tank top exposing her bare left shoulder, while her right arm is replaced with an intricate cybernetic prosthesis featuring exposed delicate wires."
             )
         else:
-            # シーン生成専用：あそび設定（creative_mode）に基づく背景・演出の肉付け
-            if creative_mode == "Rich (Creative Props/Scene)":
+            if creative_mode == "リッチ (小物・情景追加)":
                 flavor_rule = (
                     "Act as a master anime scene director. Translate the Japanese description into English tags/phrases, "
                     "and ACTIVELY ENHANCE THE SCENE by adding fitting thematic props, background furniture, atmospheric lighting, "
                     "and contextual environment elements that complement the scene (e.g., celestial globes, telescopes, scattered books, ancient charts for an academy). "
                     "DO NOT modify character design or outfits."
                 )
-            elif creative_mode == "Subtle (Light/Atmosphere)":
+            elif creative_mode == "控えめ (光・空気感)":
                 flavor_rule = (
                     "Translate the Japanese description into English tags/phrases. Subtly enhance the atmosphere "
                     "by adding light, time of day, and environmental ambiance (e.g., warm golden hour, gentle lens flare, floating dust particles). "
@@ -237,7 +333,7 @@ class AnimaPromptDirector:
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": user_text}
                     ],
-                    temperature=0.7 if creative_mode != "OFF (Strict)" else 0.3
+                    temperature=0.7 if creative_mode != "オフ" else 0.3
                 )
                 return res.choices[0].message.content.strip()
 
@@ -265,7 +361,6 @@ class AnimaPromptDirector:
                     return ans
                 return user_text
         except Exception as e:
-            # ★ 失敗した原因をコンソールにハッキリ表示
             print(f"[AnimaPromptDirector] LLM Error (Provider: {provider}): {e}")
             return user_text
 
@@ -295,12 +390,26 @@ class AnimaPromptDirector:
             text = " "
         return nodes.CLIPTextEncode().encode(clip, text)[0]
 
-    def direct_and_encode(self, model, clip, enable_positive, character_preset,
-                          part_head, part_upper, part_waist, part_lower, part_legs,
+    def direct_and_encode(self, model, clip, enable_director, character_preset,
+                          part_head, part_upper, part_waist, part_lower, part_legs, full_back_view,
                           quality_prompt, scene_prompt, llm_provider, llm_api_key, llm_model, creative_mode, convert_all_to_natural,
                           enable_negative, negative_preset, negative_prompt, lock_final_prompt, final_positive_prompt):
 
-        # 0. ロック時のOllama VRAM即時解放
+        if not enable_director:
+            print("[AnimaPromptDirector] Node Bypassed (enable_director=OFF).")
+            empty_cond = self.encode_text(clip, "")
+            return {
+                "ui": {"final_text": ["(Bypassed)"]},
+                "result": (
+                    model,
+                    clip,
+                    empty_cond,
+                    empty_cond,
+                    "",
+                    {"provider": "None", "api_key": "", "model": ""}
+                )
+            }
+
         if lock_final_prompt and llm_provider == "Ollama (Local)":
             self.unload_ollama(llm_model)
 
@@ -337,7 +446,12 @@ class AnimaPromptDirector:
                             print(f"[AnimaPromptDirector] Loaded Negative Preset: {target_neg}")
 
             if negative_prompt.strip():
-                neg_parts.append(negative_prompt.strip())
+                resolved_neg = self.resolve_wildcards(negative_prompt.strip())
+                neg_parts.append(resolved_neg)
+
+            # ★ 完全な後ろ姿ON時：振り返り・前向き要素をネガティブに自動追加
+            if full_back_view:
+                neg_parts.append("looking at viewer, facing front, front view, face, turning around, profile, side view")
 
             full_neg_text = ", ".join(neg_parts)
             clean_neg = self.clean_for_clip(full_neg_text)
@@ -346,27 +460,24 @@ class AnimaPromptDirector:
             full_neg_text = ""
             neg_conditioning = self.encode_text(clip, "")
 
-            # --- 2. ポジティブ ---
-        if not enable_positive:
-            # ★ enable_positive が OFF の場合：
-            # 自動構築（プリセット・LLM・構図等）を完全スキップし、final_positive_prompt をそのまま使用
-            structured_positive = final_positive_prompt.strip()
-            print(f"[AnimaPromptDirector] Direct Encode Mode (enable_positive=OFF): '{structured_positive}'")
-        elif lock_final_prompt and final_positive_prompt.strip():
-            # ロック中（Manualモード）
-            structured_positive = final_positive_prompt
+        # --- 2. ポジティブ ---
+        if lock_final_prompt and final_positive_prompt.strip():
+            structured_positive = self.resolve_wildcards(final_positive_prompt.strip())
         else:
-            # 通常の自動構築パイプライン
             parsed = self.parse_character_file(character_preset)
             sections_list = []
 
             # (1) 品質 / トリガー
             if quality_prompt.strip():
-                clean_q = quality_prompt.strip().rstrip(" ,")
-                sections_list.append(("# --- QUALITY & BASE ---", clean_q))
+                resolved_q = self.resolve_wildcards(quality_prompt.strip())
+                # quality_promptに直書きされた目などの前面要素も後ろ姿時は除去
+                resolved_q = self.filter_front_elements(resolved_q, is_back_view=full_back_view)
+                clean_q = resolved_q.rstrip(" ,")
+                if clean_q:
+                    sections_list.append(("# --- QUALITY & BASE ---", clean_q))
 
-            # (2) 構図 / 背景（あそび機能適用）
-            processed_scene = scene_prompt.strip()
+            # (2) 構図 / 背景
+            processed_scene = self.resolve_wildcards(scene_prompt.strip())
             if processed_scene:
                 processed_scene = self.call_llm(
                     llm_provider, llm_api_key, llm_model, processed_scene, 
@@ -374,6 +485,11 @@ class AnimaPromptDirector:
                 )
                 clean_s = processed_scene.rstrip(" ,")
                 sections_list.append(("# --- SHOT & SCENE ---", clean_s))
+
+            # ★ 完全な後ろ姿ON時：決定打となる背面固定プロンプトを自動挿入
+            if full_back_view:
+                back_enforce = "completely from behind, full back view, facing away from camera, back of head, back to camera, unseen face, facing completely backwards"
+                sections_list.append(("# --- POSE ENFORCEMENT ---", back_enforce))
 
             # (3) キャラクター各部位
             char_map = [
@@ -389,26 +505,29 @@ class AnimaPromptDirector:
                     found_texts = [parsed[t] for t in tags if t in parsed and parsed[t]]
                     if found_texts:
                         part_text = ", ".join(found_texts).strip().rstrip(" ,")
-                        sections_list.append((header, part_text))
+                        part_text = self.filter_front_elements(part_text, is_back_view=full_back_view)
+                        if part_text:
+                            sections_list.append((header, part_text))
 
             # 全体自然言語化
             if convert_all_to_natural and llm_provider != "None (Raw Tag)":
-                # QUALITY & BASE 以外のセクションだけを抽出してLLMに渡す
                 quality_section = [val for hdr, val in sections_list if hdr == "# --- QUALITY & BASE ---"]
                 target_sections = [(hdr, val) for hdr, val in sections_list if hdr != "# --- QUALITY & BASE ---"]
 
                 raw_combined = "\n\n".join([f"{hdr}\n{val}" for hdr, val in target_sections if val])
                 natural_result = self.call_llm(
                     llm_provider, llm_api_key, llm_model, raw_combined, 
-                    convert_all=True, creative_mode="OFF (Strict)"
+                    convert_all=True, creative_mode="オフ"
                 )
                 
-                # 品質タグは変換せず、そのまま一番上に結合して復元
                 final_parts = []
                 if quality_section and quality_section[0]:
                     final_parts.append(f"# --- QUALITY & BASE ---\n{quality_section[0]}")
                 
                 if natural_result and natural_result.strip():
+                    # ★ ここに追加：LLMが勝手に作文した face や eyes などの単語を完全な後ろ姿時に再除去する
+                    if full_back_view:
+                        natural_result = self.filter_front_elements(natural_result, is_back_view=True)
                     final_parts.append(natural_result.strip())
                 else:
                     fallback_blocks = [f"{hdr}\n{val}," for hdr, val in target_sections if val]
@@ -425,6 +544,12 @@ class AnimaPromptDirector:
         clip_pos_clean = self.clean_for_clip(structured_positive)
         pos_conditioning = self.encode_text(clip, clip_pos_clean)
 
+        llm_context = {
+            "provider": llm_provider,
+            "api_key": llm_api_key.strip() or os.getenv("GEMINI_API_KEY", ""),
+            "model": llm_model.strip() or "gemini-2.5-flash"
+        }
+
         return {
             "ui": {"final_text": [structured_positive]},
             "result": (
@@ -432,7 +557,7 @@ class AnimaPromptDirector:
                 clip,
                 pos_conditioning,
                 neg_conditioning,
-                structured_positive,
-                full_neg_text
+                full_neg_text,
+                llm_context
             )
         }
