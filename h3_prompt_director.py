@@ -11,6 +11,7 @@ import requests
 import google.generativeai as genai
 from openai import OpenAI
 import folder_paths
+import scipy.io.wavfile as wavfile
 
 # --- ヘルパー関数群 ---
 
@@ -44,8 +45,6 @@ def load_video_tensor(filename):
         return None
     return torch.stack(frames, dim=0)
 
-import scipy.io.wavfile as wavfile
-
 def load_audio_dict(filename):
     input_dir = folder_paths.get_input_directory()
     audio_path = os.path.join(input_dir, filename)
@@ -53,10 +52,7 @@ def load_audio_dict(filename):
         print(f"[H3PromptDirector] File not found: {audio_path}")
         return None
     try:
-        # torchcodec 依存を完全回避して安定して WAV を読み込む
         sample_rate, data = wavfile.read(audio_path)
-        
-        # 整数型(int16など)を float32 (-1.0 〜 1.0) に正規化
         if data.dtype == np.int16:
             data = data.astype(np.float32) / 32768.0
         elif data.dtype == np.int32:
@@ -67,19 +63,13 @@ def load_audio_dict(filename):
             data = data.astype(np.float32)
             
         tensor = torch.from_numpy(data)
-        
-        # モノラル [N] の場合はステレオ [2, N] または [1, N] のチャンネル次元を持たせる
         if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(0)  # [1, N]
+            tensor = tensor.unsqueeze(0)
         elif tensor.ndim == 2:
-            tensor = tensor.t()           # [C, N]
-            
-        # ComfyUIの仕様である [Batch, Channel, Samples] (3次元) に統一
-        tensor = tensor.unsqueeze(0)      # [1, C, N]
-        
+            tensor = tensor.t()
+        tensor = tensor.unsqueeze(0)
         return {"waveform": tensor, "sample_rate": int(sample_rate)}
     except Exception as e:
-        # 万が一のフォールバックとして torchaudio も試す
         try:
             waveform, sample_rate = torchaudio.load(audio_path)
             if waveform.ndim == 2:
@@ -88,7 +78,6 @@ def load_audio_dict(filename):
         except Exception as e2:
             print(f"[H3PromptDirector] Audio load error: {e} / {e2}")
             return None
-
 
 def universal_resize(tensor, target_w, target_h, mode="crop", crop_pos="center"):
     if tensor is None:
@@ -120,7 +109,7 @@ def universal_resize(tensor, target_w, target_h, mode="crop", crop_pos="center")
             sy, sx = diff_h // 2, 0
         elif crop_pos == "right":
             sy, sx = diff_h // 2, diff_w
-        else:  # center
+        else:
             sy, sx = diff_h // 2, diff_w // 2
             
         img = img[:, :, sy:sy + target_h, sx:sx + target_w]
@@ -150,7 +139,7 @@ def universal_resize(tensor, target_w, target_h, mode="crop", crop_pos="center")
             pad_left, pad_right = diff_w, 0
             pad_top = diff_h // 2
             pad_bottom = diff_h - pad_top
-        else:  # center
+        else:
             pad_left = diff_w // 2
             pad_right = diff_w - pad_left
             pad_top = diff_h // 2
@@ -162,7 +151,6 @@ def universal_resize(tensor, target_w, target_h, mode="crop", crop_pos="center")
     return tensor
 
 def process_video_tensor(tensor, target_w, target_h, mode="crop", crop_pos="center", min_frames=5):
-    """動画テンソルをリサイズし、最低5フレームを保証"""
     if tensor is None:
         return torch.zeros((min_frames, target_h, target_w, 3), dtype=torch.float32)
     
@@ -183,23 +171,19 @@ class H3PromptDirector:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # --- LLM 設定 ---
                 "[LLM] プロバイダー": (["Gemini (Cloud)", "ChatGPT (OpenAI)", "Ollama (Local)"],),
                 "[LLM] API_Key": ("STRING", {"default": "", "multiline": False}),
                 "[LLM] モデル名": ("STRING", {"default": "gemini-3.6-flash", "multiline": False}),
                 
-                # --- キャラクター＆世界観定義 ---
                 "[キャラクター] 特徴定義": ("STRING", {"multiline": True, "default": "__jill__"}),
                 "[シーン] シチュエーション & リファレンス対応": ("STRING", {"multiline": True, "default": ""}),
                 "[ボイス] セリフ & 声質指定": ("STRING", {"multiline": True, "default": ""}),
                 
-                # --- 演出・タイムライン・禁止事項 ---
                 "[品質管理] 禁止事項 & スタイル維持": ("STRING", {"multiline": True, "default": "3D化しない。CGIレンダリング禁止。プラスチックのような光沢肌禁止。滑らかなグラデーション陰影禁止。フラットなアニメ塗り（セル画）を維持。"}),
                 "[タイムライン] 時間軸の動き (秒数指定)": ("STRING", {"multiline": True, "default": ""}),
                 "[環境音] Foley & アンビエント": ("STRING", {"multiline": True, "default": ""}),
                 "[BGM] 劇伴音楽 (N/Aで無音)": ("STRING", {"multiline": True, "default": "N/A"}),
                 
-                # --- タイムラインデータ (非表示UI連携) ---
                 "timeline_data": ("STRING", {"default": "{\"items\":[]}"}),
             }
         }
@@ -379,6 +363,7 @@ Music: {BGM}
         prompt_result = re.sub(r'("[\u3040-\u30ff\u4e00-\u9fff][^"\n]*")\s*[-–—]\s*[A-Za-z0-9\s,\.\'!?]+', r'\1', prompt_result)
 
         image_dict = {}
+        keyframe_dict = {}
         video_dict = {}
         audio_dict = {}
 
@@ -398,6 +383,10 @@ Music: {BGM}
                     t = load_image_raw_tensor(val)
                     if t is not None:
                         image_dict[slot] = t
+                elif media_type == "keyframe":
+                    t = load_image_raw_tensor(val)
+                    if t is not None:
+                        keyframe_dict[slot] = t  # 0: 開始, 1: 終了
                 elif media_type == "video":
                     v = load_video_tensor(val)
                     if v is not None:
@@ -412,99 +401,12 @@ Music: {BGM}
 
         media_bundle = {
             "images": image_dict,
+            "keyframes": keyframe_dict,
             "videos": video_dict,
             "audios": audio_dict
         }
 
         return (prompt_result, media_bundle)
-
-
-# ==========================================
-# ノード 2: H3MediaDispatcher（3系統リサイズ対応）
-# ==========================================
-
-class H3MediaDispatcher:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "media_bundle": ("H3_MEDIA_BUNDLE",),
-                "width": ("INT", {"default": 1344, "min": 64, "max": 4096, "step": 32}),
-                "height": ("INT", {"default": 768, "min": 64, "max": 4096, "step": 32}),
-                
-                # --- FL2VA (first / last frame) 設定 ---
-                "[FL2VA] リサイズ方式": (["crop", "pad", "stretch"], {"default": "crop"}),
-                "[FL2VA] 基準位置": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
-                
-                # --- REF2VA (ref_images 0-8) 設定 ---
-                "[REF2VA] リサイズ方式": (["crop", "pad", "stretch"], {"default": "crop"}),
-                "[REF2VA] 基準位置": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
-                
-                # --- V2V (ref_video 0-1) 設定 ---
-                "[V2V] リサイズ方式": (["crop", "pad", "stretch"], {"default": "crop"}),
-                "[V2V] 基準位置": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
-            }
-        }
-
-    RETURN_TYPES = (
-        "IMAGE", "IMAGE", "IMAGE", 
-        "IMAGE", "IMAGE", 
-        "AUDIO", "AUDIO", "AUDIO"
-    )
-    RETURN_NAMES = (
-        "first_frame", "last_frame", "ref_images",
-        "ref_video_0", "ref_video_1",
-        "ref_audio_0", "ref_audio_1", "ref_audio_2"
-    )
-    FUNCTION = "dispatch_all"
-    CATEGORY = "MiniMax_H3"
-
-    def dispatch_all(self, media_bundle, width, height, **kwargs):
-        fl2va_mode = kwargs.get("[FL2VA] リサイズ方式", "crop")
-        fl2va_pos = kwargs.get("[FL2VA] 基準位置", "center")
-        
-        ref2va_mode = kwargs.get("[REF2VA] リサイズ方式", "crop")
-        ref2va_pos = kwargs.get("[REF2VA] 基準位置", "center")
-        
-        v2v_mode = kwargs.get("[V2V] リサイズ方式", "crop")
-        v2v_pos = kwargs.get("[V2V] 基準位置", "center")
-
-        images = media_bundle.get("images", {})
-        videos = media_bundle.get("videos", {})
-        audios = media_bundle.get("audios", {})
-
-        # 1. FL2VA用 (first_frame / last_frame)
-        raw_0 = images.get(0)
-        raw_1 = images.get(1, raw_0)
-        first_frame = universal_resize(raw_0, width, height, mode=fl2va_mode, crop_pos=fl2va_pos)
-        last_frame = universal_resize(raw_1, width, height, mode=fl2va_mode, crop_pos=fl2va_pos)
-
-        # 2. REF2VA用 (ref_images バッチ 0〜8)
-        batch_list = []
-        dummy_canvas = torch.zeros((1, height, width, 3), dtype=torch.float32)
-        for i in range(9):
-            if i in images:
-                batch_list.append(universal_resize(images[i], width, height, mode=ref2va_mode, crop_pos=ref2va_pos))
-            else:
-                batch_list.append(dummy_canvas)
-        ref_images_batch = torch.cat(batch_list, dim=0)
-
-        # 3. V2V用 (ref_video_0, ref_video_1) - リサイズ ＆ 最低5フレーム保証
-        ref_video_0 = process_video_tensor(videos.get(0), width, height, mode=v2v_mode, crop_pos=v2v_pos)
-        ref_video_1 = process_video_tensor(videos.get(1), width, height, mode=v2v_mode, crop_pos=v2v_pos)
-
-        # 4. 音声 (0〜2)
-        dummy_audio = {"waveform": torch.zeros((1, 2, 44100)), "sample_rate": 44100}
-        ref_audio_0 = audios.get(0, dummy_audio)
-        ref_audio_1 = audios.get(1, dummy_audio)
-        ref_audio_2 = audios.get(2, dummy_audio)
-
-        return (
-            first_frame, last_frame, ref_images_batch,
-            ref_video_0, ref_video_1,
-            ref_audio_0, ref_audio_1, ref_audio_2
-        )
-
 
 class OllamaVRAMUnloader:
     @classmethod
@@ -529,6 +431,7 @@ class OllamaVRAMUnloader:
             pass
         return (text,)
         
+
 # ==========================================
 # ノード 3: H3CharacterSubjectManager (複数キャラ管理)
 # ==========================================
@@ -548,19 +451,16 @@ class H3CharacterSubjectManager:
         audio_list = ["None", "<Audio 0>", "<Audio 1>", "<Audio 2>"]
         return {
             "required": {
-                # --- キャラクター 1 ---
                 "キャラ1 プリセット": (char_list, {"default": "None"}),
                 "キャラ1 名前": ("STRING", {"default": "Franc", "multiline": False}),
                 "キャラ1 音声リファレンス": (audio_list, {"default": "None"}),
                 "キャラ1 追記": ("STRING", {"multiline": True, "default": ""}),
                 
-                # --- キャラクター 2 ---
                 "キャラ2 プリセット": (char_list, {"default": "None"}),
                 "キャラ2 名前": ("STRING", {"default": "", "multiline": False}),
                 "キャラ2 音声リファレンス": (audio_list, {"default": "None"}),
                 "キャラ2 追記": ("STRING", {"multiline": True, "default": ""}),
                 
-                # --- キャラクター 3 ---
                 "キャラ3 プリセット": (char_list, {"default": "None"}),
                 "キャラ3 名前": ("STRING", {"default": "", "multiline": False}),
                 "キャラ3 音声リファレンス": (audio_list, {"default": "None"}),
@@ -613,6 +513,7 @@ class H3CharacterSubjectManager:
         result_text = "\n\n".join(subjects)
         return (result_text,)
         
+
 # ==========================================
 # ノード 4: H3TimelineDirector (マルチショット・時間軸管理)
 # ==========================================
@@ -622,25 +523,21 @@ class H3TimelineDirector:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # --- Shot 1 ---
                 "ショット1_有効": ("BOOLEAN", {"default": True}),
                 "ショット1_タイム (例: 0:00-0:03.0)": ("STRING", {"default": "0:00-0:03.0"}),
                 "ショット1_アクション/構図": ("STRING", {"multiline": True, "default": ""}),
                 "ショット1_セリフ (例: S1: セリフ)": ("STRING", {"multiline": True, "default": "S1: "}),
                 
-                # --- Shot 2 ---
                 "ショット2_有効": ("BOOLEAN", {"default": False}),
                 "ショット2_タイム (例: 0:03.0-0:08.0)": ("STRING", {"default": "0:03.0-0:08.0"}),
                 "ショット2_アクション/構図": ("STRING", {"multiline": True, "default": ""}),
                 "ショット2_セリフ": ("STRING", {"multiline": True, "default": "S2: "}),
 
-                # --- Shot 3 ---
                 "ショット3_有効": ("BOOLEAN", {"default": False}),
                 "ショット3_タイム (例: 0:08.0-0:11.5)": ("STRING", {"default": "0:08.0-0:11.5"}),
                 "ショット3_アクション/構図": ("STRING", {"multiline": True, "default": ""}),
                 "ショット3_セリフ": ("STRING", {"multiline": True, "default": ""}),
 
-                # --- Shot 4 ---
                 "ショット4_有効": ("BOOLEAN", {"default": False}),
                 "ショット4_タイム (例: 0:11.5-0:15.0)": ("STRING", {"default": "0:11.5-0:15.0"}),
                 "ショット4_アクション/構図": ("STRING", {"multiline": True, "default": ""}),
@@ -678,7 +575,6 @@ class H3TimelineDirector:
             time_range = kwargs.get(f"ショット{i}_タイム (例: 0:00-0:03.0)", "").strip()
             action = kwargs.get(f"ショット{i}_アクション/構図", "").strip()
             
-            # FIX: ショット1のみ特殊なキー名になっているのを確実に拾う
             if i == 1:
                 dialogue_raw = kwargs.get("ショット1_セリフ (例: S1: セリフ)", "").strip()
             else:

@@ -8,15 +8,14 @@ from .anima_resolution import AnimaResolutionSelector
 
 from .h3_prompt_director import (
     H3PromptDirector,
-    H3MediaDispatcher,
     OllamaVRAMUnloader,
     H3CharacterSubjectManager,
     H3TimelineDirector,
 )
-
-# ★ ここをファイル名に合わせて変更
 from .h3_prompt_director_gui import (
     H3PromptDirectorGUI,
+    H3MediaDispatcher,
+    HKMC_ModelSelector,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -29,6 +28,7 @@ NODE_CLASS_MAPPINGS = {
     "H3CharacterSubjectManager": H3CharacterSubjectManager,
     "H3TimelineDirector": H3TimelineDirector,
     "H3PromptDirectorGUI": H3PromptDirectorGUI,
+    "HKMC_ModelSelector": HKMC_ModelSelector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -41,6 +41,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3CharacterSubjectManager": "H3 Character Subject Manager",
     "H3TimelineDirector": "H3 Timeline Director",
     "H3PromptDirectorGUI": "H3promptDirector(GUI)",
+    "HKMC_ModelSelector": "HKMC Model Selector",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
