@@ -17,6 +17,7 @@ from .h3_prompt_director_gui import (
     H3MediaDispatcher,
     HKMC_ModelSelector,
 )
+from .save_audio_wav import SaveAudioWav
 
 NODE_CLASS_MAPPINGS = {
     "AnimaPromptDirector": AnimaPromptDirector,
@@ -29,6 +30,7 @@ NODE_CLASS_MAPPINGS = {
     "H3TimelineDirector": H3TimelineDirector,
     "H3PromptDirectorGUI": H3PromptDirectorGUI,
     "HKMC_ModelSelector": HKMC_ModelSelector,
+    "SaveAudioWav": SaveAudioWav,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -42,6 +44,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3TimelineDirector": "H3 Timeline Director",
     "H3PromptDirectorGUI": "H3promptDirector(GUI)",
     "HKMC_ModelSelector": "HKMC Model Selector",
+    "SaveAudioWav": "Save Audio (WAV)",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
