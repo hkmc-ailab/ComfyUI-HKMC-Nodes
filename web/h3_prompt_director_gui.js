@@ -85,10 +85,54 @@ function installStudioStyles() {
             border: 1px solid #383838;
             color: #dbe0e6;
         }
-        .h3-toggle-chip input[type="checkbox"] {
+        .h3-toggle-chip input[type="checkbox"],
+        .h3-toggle-chip input[type="radio"] {
             cursor: pointer;
             margin: 0;
             pointer-events: none;
+        }
+
+        .h3-dialogue-block {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .h3-dialogue-label {
+            font-size: 10px;
+            color: #9aa0a6;
+            font-weight: bold;
+        }
+        .h3-speaker-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .h3-speaker-chip {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            background: #181818;
+            border: 1px solid #333333;
+            border-radius: 6px;
+            padding: 4px 0;
+            cursor: pointer;
+            font-size: 10px;
+            font-weight: 600;
+            color: #8b949e;
+            user-select: none;
+            transition: all 0.12s;
+        }
+        .h3-speaker-chip:hover {
+            border-color: #555555;
+            color: #ffffff;
+        }
+        .h3-speaker-chip.active {
+            background: #007acc;
+            border-color: #5bb3f5;
+            color: #ffffff;
+            font-weight: bold;
         }
 
         .h3-tab-content {
@@ -119,11 +163,6 @@ function installStudioStyles() {
             border: none;
             padding-left: 2px;
             margin-top: 2px;
-        }
-        .h3-grid-2 {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
         }
         .h3-field-row {
             display: flex;
@@ -351,36 +390,26 @@ function installStudioStyles() {
             overflow: hidden;
             box-sizing: border-box;
         }
-
-        .h3-slot.image-slot {
+        .h3-slot.image-slot,
+        .h3-slot.keyframe-slot {
             border: 1px dashed #3a75a4;
         }
-        .h3-slot.image-slot .h3-slot-add {
-            color: #5bb3f5;
-        }
-        .h3-slot.image-slot.occupied {
+        .h3-slot.image-slot.occupied,
+        .h3-slot.keyframe-slot.occupied {
             border: 1px solid #5bb3f5;
             background-size: cover;
             background-position: center;
         }
-
         .h3-slot.video-slot {
             border: 1px dashed #6a4c82;
-        }
-        .h3-slot.video-slot .h3-slot-add {
-            color: #d8aef5;
         }
         .h3-slot.video-slot.occupied {
             border: 1px solid #b887d8;
             background-size: cover;
             background-position: center;
         }
-
         .h3-slot.audio-slot {
             border: 1px dashed #3b7560;
-        }
-        .h3-slot.audio-slot .h3-slot-add {
-            color: #7ecf9d;
         }
         .h3-slot.audio-slot.occupied {
             border: 1px solid #7ecf9d;
@@ -388,7 +417,6 @@ function installStudioStyles() {
             justify-content: flex-start;
             padding-top: 6px;
         }
-
         .h3-slot-add {
             font-size: 20px;
             font-weight: bold;
@@ -423,7 +451,6 @@ function installStudioStyles() {
             text-align: center;
             pointer-events: none;
         }
-        
         .h3-slot-tag-btn {
             position: absolute;
             bottom: 2px;
@@ -441,7 +468,6 @@ function installStudioStyles() {
             z-index: 2;
         }
         .h3-slot-tag-btn:hover { background: #383838; }
-
         .h3-slot-del-btn {
             position: absolute;
             top: 2px;
@@ -508,7 +534,7 @@ app.registerExtension({
                 let activeTab = "cast";
                 let lastFocusedInput = null;
                 let isMediaCollapsed = false;
-                let mediaBodyHeight = 300;
+                let mediaBodyHeight = 340;
 
                 let state = { items: [] };
                 try {
@@ -605,7 +631,7 @@ app.registerExtension({
                         const deltaY = startY - ev.clientY;
                         let newH = startHeight + deltaY;
                         if (newH < 80) newH = 80;
-                        if (newH > 480) newH = 480;
+                        if (newH > 520) newH = 520;
                         mediaBodyHeight = newH;
                         mediaBody.style.height = `${newH}px`;
                     };
@@ -640,7 +666,7 @@ app.registerExtension({
                     let target = lastFocusedInput;
                     if (!target) {
                         const ta = contentArea.querySelector("textarea");
-                        if (ta) target = ta;
+                        if (target === null && ta) target = ta;
                     }
                     if (target) {
                         const start = target.selectionStart || target.value.length;
@@ -719,6 +745,71 @@ app.registerExtension({
                     }
                     row.appendChild(el);
                     return row;
+                };
+
+                // セリフ見出し ＋ 話者選択チップ ＋ セリフ入力欄 を1つのブロックとして構築
+                const createDialogueWithSpeaker = (shotIndex) => {
+                    const block = document.createElement("div");
+                    block.className = "h3-dialogue-block";
+
+                    const lbl = document.createElement("div");
+                    lbl.className = "h3-dialogue-label";
+                    lbl.textContent = "セリフ";
+                    block.appendChild(lbl);
+
+                    const bar = document.createElement("div");
+                    bar.className = "h3-speaker-bar";
+
+                    const spkWidget = wMap[`shot${shotIndex}_speaker`];
+                    const options = [
+                        { label: "なし", value: "None" },
+                        { label: "キャラ1 (S1)", value: "S1" },
+                        { label: "キャラ2 (S2)", value: "S2" },
+                        { label: "キャラ3 (S3)", value: "S3" }
+                    ];
+
+                    const chips = [];
+                    const curVal = spkWidget && spkWidget.value !== undefined ? spkWidget.value : (shotIndex === 1 ? "S1" : "None");
+
+                    options.forEach(opt => {
+                        const chip = document.createElement("div");
+                        chip.className = `h3-speaker-chip ${curVal === opt.value ? "active" : ""}`;
+                        chip.textContent = opt.label;
+
+                        chip.onclick = () => {
+                            chips.forEach(c => c.classList.remove("active"));
+                            chip.classList.add("active");
+                            if (spkWidget) {
+                                spkWidget.value = opt.value;
+                                if (spkWidget.callback) spkWidget.callback(opt.value);
+                            }
+                        };
+                        chips.push(chip);
+                        bar.appendChild(chip);
+                    });
+                    block.appendChild(bar);
+
+                    const diaWidget = wMap[`shot${shotIndex}_dialogue`];
+                    const ta = document.createElement("textarea");
+                    ta.style.background = "#202020";
+                    ta.style.color = "#ffffff";
+                    ta.style.border = "1px solid #383838";
+                    ta.style.padding = "8px";
+                    ta.style.borderRadius = "8px";
+                    ta.style.minHeight = "64px";
+                    ta.style.outline = "none";
+                    ta.placeholder = "セリフのみを入力 (話者は上のボタンで選択)";
+                    ta.value = diaWidget && diaWidget.value !== undefined ? diaWidget.value : "";
+                    ta.oninput = () => {
+                        if (diaWidget) {
+                            diaWidget.value = ta.value;
+                            if (diaWidget.callback) diaWidget.callback(ta.value);
+                        }
+                    };
+                    ta.onfocus = () => { lastFocusedInput = ta; };
+                    block.appendChild(ta);
+
+                    return block;
                 };
 
                 const createTimePicker = (shotIndex) => {
@@ -988,9 +1079,9 @@ app.registerExtension({
 
                             const timeRow = createTimePicker(i);
                             const actionRow = bindInput(`shot${i}_action`, "アクション / 構図", true, `ショット${i}_アクション/構図`);
-                            const diaRow = bindInput(`shot${i}_dialogue`, "セリフ (例: S1: セリフ)", true);
+                            const diaBlock = createDialogueWithSpeaker(i);
 
-                            card.append(title, timeRow, actionRow, diaRow);
+                            card.append(title, timeRow, actionRow, diaBlock);
                             contentArea.appendChild(card);
                             shotCards[i] = card;
                         }
@@ -1121,7 +1212,7 @@ app.registerExtension({
                         const res = await api.fetchApi("/upload/image", { method: "POST", body: form });
                         const json = await res.json();
                         const { type, index } = activeSlotConfig;
-                        state.items = state.items.filter(it => !(it.laneType === type && it.slot === index));
+                        state.items = state.items.filter(it => !((it.laneType || it.type) === type && it.slot === index));
                         state.items.push({ type: type, value: json.name, slot: index, laneType: type });
                         if (wMap["timeline_data"]) {
                             wMap["timeline_data"].value = JSON.stringify(state);
@@ -1131,15 +1222,16 @@ app.registerExtension({
                     }
                 };
 
-                const buildSlot = (laneEl, laneType, slotIdx, tagName, acceptTypes) => {
+                const buildSlot = (laneEl, laneType, slotIdx, tagName, acceptTypes, badgeText = null, isKeyframe = false) => {
                     const slot = document.createElement("div");
-                    slot.className = `h3-slot ${laneType}-slot`;
+                    const slotClass = isKeyframe ? "keyframe-slot" : `${laneType}-slot`;
+                    slot.className = `h3-slot ${slotClass}`;
 
                     const item = state.items.find(it => (it.laneType || it.type) === laneType && it.slot === slotIdx);
 
                     const badge = document.createElement("span");
                     badge.className = "h3-slot-badge";
-                    badge.textContent = `#${slotIdx}`;
+                    badge.textContent = badgeText !== null ? badgeText : `#${slotIdx}`;
                     slot.appendChild(badge);
 
                     if (item && item.value) {
@@ -1156,14 +1248,16 @@ app.registerExtension({
                             slot.append(icon, nameEl);
                         }
 
-                        const btn = document.createElement("button");
-                        btn.className = "h3-slot-tag-btn";
-                        btn.textContent = `+ ${tagName}`;
-                        btn.onclick = (e) => {
-                            e.stopPropagation();
-                            insertTagToFocusOrScene(`<${tagName}>`);
-                        };
-                        slot.appendChild(btn);
+                        if (tagName) {
+                            const btn = document.createElement("button");
+                            btn.className = "h3-slot-tag-btn";
+                            btn.textContent = `+ ${tagName}`;
+                            btn.onclick = (e) => {
+                                e.stopPropagation();
+                                insertTagToFocusOrScene(`<${tagName}>`);
+                            };
+                            slot.appendChild(btn);
+                        }
 
                         const del = document.createElement("button");
                         del.className = "h3-slot-del-btn";
@@ -1227,6 +1321,15 @@ app.registerExtension({
                         buildSlot(imgLane, "image", i, `Picture ${i}`, "image/*");
                     }
 
+                    const kfBlock = document.createElement("div");
+                    kfBlock.className = "h3-lane-block";
+                    kfBlock.innerHTML = `<div class="h3-section-title">キーフレーム画像 <span class="h3-section-sub">(First Frame / Last Frame)</span></div>`;
+                    const kfLane = document.createElement("div");
+                    kfLane.className = "h3-lane";
+                    kfBlock.appendChild(kfLane);
+                    buildSlot(kfLane, "keyframe", 0, null, "image/*", "開始", true);
+                    buildSlot(kfLane, "keyframe", 1, null, "image/*", "終了", true);
+
                     const vidBlock = document.createElement("div");
                     vidBlock.className = "h3-lane-block";
                     vidBlock.innerHTML = `<div class="h3-section-title">リファレンス映像 <span class="h3-section-sub">(Video 0-1)</span></div>`;
@@ -1247,7 +1350,7 @@ app.registerExtension({
                         buildSlot(audLane, "audio", i, `Audio ${i}`, "audio/*");
                     }
 
-                    mediaBody.append(imgBlock, vidBlock, audBlock);
+                    mediaBody.append(imgBlock, kfBlock, vidBlock, audBlock);
                 };
 
                 if (node.addDOMWidget) {
@@ -1259,6 +1362,12 @@ app.registerExtension({
                 }
 
                 node.setSize([720, 880]);
+
+                // ★ ノードのレイアウト崩れ（幅が半分になる現象）を防ぐ強制サイズロック
+                node.computeSize = function() {
+                    return [Math.max(720, this.size[0] || 720), Math.max(880, this.size[1] || 880)];
+                };
+
                 renderTabContent();
                 renderFixedMediaLanes();
 
