@@ -17,6 +17,13 @@ from aiohttp import web
 
 # --- ヘルパー関数群 ---
 
+def load_system_rules():
+    rule_path = os.path.join(os.path.dirname(__file__), "rules.txt")
+    if os.path.exists(rule_path):
+        with open(rule_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return ""
+
 def load_image_raw_tensor(filename):
     input_dir = folder_paths.get_input_directory()
     image_path = os.path.join(input_dir, filename)
@@ -276,6 +283,7 @@ def build_and_generate_prompt(kwargs):
 
         action = kwargs.get(f"shot{i}_action", "").strip()
         dialogue_raw = kwargs.get(f"shot{i}_dialogue", "").strip()
+        speaker_choice = kwargs.get(f"shot{i}_speaker", "None")
 
         content = []
         if action:
@@ -283,17 +291,9 @@ def build_and_generate_prompt(kwargs):
         if dialogue_raw:
             lines = [l.strip() for l in dialogue_raw.split("\n") if l.strip()]
             for line in lines:
-                spk = f"S{i}"
                 dia = line
-                if ":" in line:
-                    parts = line.split(":", 1)
-                    parsed_spk = parts[0].strip()
-                    if re.match(r"^S\d+$", parsed_spk, re.IGNORECASE):
-                        spk = parsed_spk.upper()
-                        dia = parts[1].strip()
-                    else:
-                        dia = parts[1].strip()
-
+                # ユーザーが誤ってS1:などを手入力していても除去
+                dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
                 dia = re.sub(
                     r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*",
                     "",
@@ -305,11 +305,16 @@ def build_and_generate_prompt(kwargs):
                 ).strip().strip('"').strip("'")
 
                 if dia:
-                    formatted_line = f"{spk}: <d>[Japanese] {dia} </d>"
+                    # 話者が指定されている場合はプレフィックスを自動付与
+                    if speaker_choice in ["S1", "S2", "S3"]:
+                        formatted_line = f"{speaker_choice}: <d>[Japanese] {dia} </d>"
+                    else:
+                        formatted_line = f"<d>[Japanese] {dia} </d>"
+
                     content.append(formatted_line)
                     ordered_dialogues.append({
                         "shot": len(shots) + 1,
-                        "speaker": spk,
+                        "speaker": speaker_choice if speaker_choice != "None" else f"S{i}",
                         "dialogue": dia,
                         "full": formatted_line,
                     })
@@ -343,54 +348,17 @@ def build_and_generate_prompt(kwargs):
             " extra atmospheric effects."
         )
 
-    sys_inst = f"""
-You are an expert prompt engineer specialized in the MiniMax H3 video generation model.
-Your task is to strictly convert the user's Japanese instructions into an English structured prompt.
-
-[ABSOLUTE FORMAT RULES - ZERO TOLERANCE]
-1. Output MUST be 100% English except for Japanese dialogue inside `<d>[Japanese] ... </d>`.
-2. You MUST output ONLY the following 6 exact section headers in raw plain text, strictly in this order. Do NOT add any extra headers, symbols, or markdown blocks:
-subject_definitions:
-summary:
-retention_analysis:
-detailed_description:
-overall_soundscape:
-non_diegetic_music:
-
-3. [SECTION RULES - STRICT SEPARATION]
-- `subject_definitions:`
-  MUST define characters using EXACTLY the header `[Subject X: CharacterName]`.
-  MUST contain ONLY the character's physical appearance, clothing, and the exact English translation of the user's "Extra Details".
-  Do NOT arbitrarily interpret or summarize the Extra Details; translate them faithfully.
-  MUST retain tags like `<Picture 0>` exactly as they are without translation.
-
-- `summary:`
-  MUST contain ONLY the translation and atmospheric direction of the scene (シチュエーション＆世界観).
-  {creative_instruction}
-  CRITICAL: DO NOT include dialogue tags (<d>...</d>), DO NOT include speaker tags (S1:, S2:), and DO NOT describe speech here. Speech belongs strictly in `detailed_description:`.
-
-- `retention_analysis:`
-  MUST contain ONLY the translation of the user's "Retention" (禁止事項＆スタイル維持) plus the default rule: "Strictly 2D flat cel-shaded anime style. No 3D CGI rendering, no glossy plastic skin."
-
-- `detailed_description:`
-  MUST include EVERY shot header from "Movement & Timing" exactly as given (e.g., `[Shot 1 | 0:00.0-0:04.0]`). NEVER omit shot headers.
-  Format actions per shot as: "[CharacterName] visibly opening and moving mouth in natural anime lip-sync articulation while speaking: SX: <d>[Japanese] DialogueText </d>"
-  DO NOT use `[Subject X: ...]` tags here; use plain character names.
-
-- `overall_soundscape:`
-  MUST contain ONLY the translation of the user's "Soundscape".
-
-- `non_diegetic_music:`
-  MUST contain ONLY the translation of the user's "Music".
-
-[User Input]
-Character Concept: {char_description}
-Situation: {kwargs.get('situation', '')}
-Movement & Timing: {timeline_seq}
-Retention: {kwargs.get('quality_control', '')}
-Soundscape: {kwargs.get('ambient_sound', '')}
-Music: {kwargs.get('bgm', '')}
-"""
+    raw_rules = load_system_rules()
+    sys_inst = raw_rules.format(
+        creative_instruction=creative_instruction,
+        char_description=char_description,
+        situation=kwargs.get("situation", ""),
+        timeline_seq=timeline_seq,
+        quality_control=kwargs.get("quality_control", ""),
+        ambient_sound=kwargs.get("ambient_sound", ""),
+        bgm=kwargs.get("bgm", ""),
+    )
+    
     provider = kwargs.get("llm_provider", "Ollama (Local)")
     api_key = kwargs.get("llm_api_key", "")
     model_name = kwargs.get("llm_model", "").strip()
@@ -441,40 +409,49 @@ Music: {kwargs.get('bgm', '')}
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
-    prompt_result = re.sub(
-        r"\[d\]\s*\[Japanese\]", r"<d>[Japanese]", prompt_result, flags=re.IGNORECASE
-    )
-    prompt_result = re.sub(
-        r"\[d\]", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE
-    )
+    # 1. タグ表記の揺らぎを修正
+    prompt_result = re.sub(r"\[d\]\s*\[Japanese\]", r"<d>[Japanese]", prompt_result, flags=re.IGNORECASE)
+    prompt_result = re.sub(r"\[d\]", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"\[\/d\]", r"</d>", prompt_result, flags=re.IGNORECASE)
+    prompt_result = re.sub(r"<d>\s*(?!\[Japanese\])", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE)
+
+    # 2. リップシンク構文の分離（TTS巻き込み誤読防止のため「speaking:」等を削り、前後に空行を確保）
     prompt_result = re.sub(
-        r"<d>\s*(?!\[Japanese\])",
-        r"<d>[Japanese] ",
+        r"[\s,]*(?:visibly opening and moving mouth.*?while (?:speaking|delivering line):?|speaking:|delivering line:?|saying:?)\s*(S\d+:\s*<d>\[Japanese\])",
+        r".\n\n\1",
         prompt_result,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE
     )
+    
+    # セリフタグの直前に空行がない場合は挿入
     prompt_result = re.sub(
-        r"(?<!visibly opening and moving mouth in natural anime lip-sync"
-        r" articulation while speaking: )(?<!articulation while speaking:"
-        r" )(S\d+:\s*<d>\[Japanese\])",
-        r"visibly opening and moving mouth in natural anime lip-sync articulation"
-        r" while speaking: \1",
-        prompt_result,
+        r"(?<!\n)(S\d+:\s*<d>\[Japanese\])",
+        r"\n\n\1",
+        prompt_result
+    )
+    
+    # セリフタグの直後に空行がない場合は挿入
+    prompt_result = re.sub(
+        r"(<\/d>)(?!\s*\n)",
+        r"\1\n\n",
+        prompt_result
     )
 
+    # 3. LLMがセリフを秒数や英語に化けさせた場合、入力された純粋なセリフで順番通りに完全強制置換
     if ordered_dialogues:
-        for item in ordered_dialogues:
-            target_dia = item["dialogue"]
-            speaker = item["speaker"]
-            pattern_no_spk = rf"(?<!{speaker}:\s)<d>\[Japanese\]\s*{re.escape(target_dia)}\s*<\/d>"
-            if re.search(pattern_no_spk, prompt_result):
-                prompt_result = re.sub(
-                    pattern_no_spk,
-                    f"{speaker}: <d>[Japanese] {target_dia} </d>",
-                    prompt_result,
-                )
+        shot_dia_matches = list(re.finditer(r"(S\d+:\s*)?<d>\[Japanese\](.*?)<\/d>", prompt_result))
+        for idx, item in enumerate(ordered_dialogues):
+            if idx < len(shot_dia_matches):
+                target_match = shot_dia_matches[idx]
+                spk = item["speaker"]
+                correct_dia = item["dialogue"]
+                prefix = f"{spk}: " if spk != "None" else ""
+                replacement = f"{prefix}<d>[Japanese] {correct_dia} </d>"
+                prompt_result = prompt_result[:target_match.start()] + replacement + prompt_result[target_match.end():]
+                # 置換によるインデックスずれを再取得
+                shot_dia_matches = list(re.finditer(r"(S\d+:\s*)?<d>\[Japanese\](.*?)<\/d>", prompt_result))
 
+    # 4. 余分なタグやプレフィックスのクレンジング
     prompt_result = re.sub(r"禁止事項(?:＆|&)?スタイル維持:?", "", prompt_result)
     prompt_result = re.sub(r"\[S\d+:?\]\s*", "", prompt_result)
     prompt_result = re.sub(
@@ -501,15 +478,10 @@ Music: {kwargs.get('bgm', '')}
         body = re.sub(r"<d>.*?</d>", "", body, flags=re.DOTALL)
         body = re.sub(r"S\d+:.*?(?=\.|\n|$)", "", body)
         body = re.sub(r"[^.\n]*visibly open[^.\n]*\.", "", body, flags=re.IGNORECASE)
-        body = re.sub(
-            r"[^.\n]*while speaking:?[^.\n]*\.", "", body, flags=re.IGNORECASE
-        )
-        body = re.sub(
-            r"Thematic props include.*?tank top.*?\.", "", body, flags=re.IGNORECASE
-        )
-        clean_text = "\n".join(
-            [line.strip() for line in body.splitlines() if line.strip()]
-        )
+        body = re.sub(r"[^.\n]*while speaking:?[^.\n]*\.", "", body, flags=re.IGNORECASE)
+        body = re.sub(r"[^.\n]*while delivering line:?[^.\n]*\.", "", body, flags=re.IGNORECASE)
+        body = re.sub(r"Thematic props include.*?tank top.*?\.", "", body, flags=re.IGNORECASE)
+        clean_text = "\n".join([line.strip() for line in body.splitlines() if line.strip()])
         return f"summary:\n{clean_text}\n\n"
 
     prompt_result = re.sub(
@@ -528,91 +500,50 @@ Music: {kwargs.get('bgm', '')}
                 time_header = time_tag_match.group(0)
                 if f"[Shot {idx}" not in prompt_result:
                     spk_target = f"S{idx}:"
-                    pattern = (
-                        rf"(?:\n|\A)(?:([^\n:]+?visibly"
-                        rf" opening[^\n:]*speaking[^\n:]*:\s*{spk_target}))"
-                    )
+                    pattern = rf"(?:\n|\A)([^\n]*?{spk_target}\s*<d>)"
                     if re.search(pattern, prompt_result):
-                        prompt_result = re.sub(
-                            pattern, rf"\n\n{time_header}\n\1", prompt_result, count=1
-                        )
+                        prompt_result = re.sub(pattern, rf"\n\n{time_header}\n\1", prompt_result, count=1)
 
-    prompt_result = re.sub(
-        r"(?<!<)\bPicture\s*(\d+)\b(?!>)", r"<Picture \1>", prompt_result
-    )
-    prompt_result = re.sub(
-        r"(?<!<)\bAudio\s*(\d+)\b(?!>)", r"<Audio \1>", prompt_result
-    )
+    prompt_result = re.sub(r"(?<!<)\bPicture\s*(\d+)\b(?!>)", r"<Picture \1>", prompt_result)
+    prompt_result = re.sub(r"(?<!<)\bAudio\s*(\d+)\b(?!>)", r"<Audio \1>", prompt_result)
     prompt_result = re.sub(r"(<\/d>)\s*\([^)]+\)", r"\1", prompt_result)
     prompt_result = re.sub(r"\bSX:\s*", "", prompt_result)
 
+    # 5. キャラクター参照の注入
     for idx, refs in sorted(char_refs.items(), key=lambda x: x[0]):
         label = refs["label"]
         extra_text = refs.get("extra", "")
 
         ref_parts = []
         if refs["pics"]:
-            ref_parts.append(
-                f"Reference sheets for {label} include {refs['pics_str']}."
-            )
+            ref_parts.append(f"Reference sheets for {label} include {refs['pics_str']}.")
         if refs["audio"] and refs["audio"] != "None":
             ref_parts.append(f"Vocal reference for {label} is {refs['audio']}.")
         ref_line = " ".join(ref_parts)
 
-        subj_pat = (
-            rf"(\[Subject\s*{idx}\s*:[^\]]*\])(.*?)(?=\n\s*\[Subject|\n\n[a-z_]+:|\Z)"
-        )
+        subj_pat = rf"(\[Subject\s*{idx}\s*:[^\]]*\])(.*?)(?=\n\s*\[Subject|\n\n[a-z_]+:|\Z)"
         match = re.search(subj_pat, prompt_result, re.DOTALL | re.IGNORECASE)
 
         if match:
             header = f"[Subject {idx}: {label}]"
             body = match.group(2).strip()
-
             for p in refs["pics"]:
                 if p in extra_text and p not in body:
-                    body += (
-                        f" {p} shows the same character's appearance and reference"
-                        " angles."
-                    )
-
+                    body += f" {p} shows the same character's appearance and reference angles."
             new_body = f"{body}\n{ref_line}\n"
-            prompt_result = (
-                prompt_result[: match.start()]
-                + header
-                + "\n"
-                + new_body
-                + prompt_result[match.end() :]
-            )
+            prompt_result = prompt_result[:match.start()] + header + "\n" + new_body + prompt_result[match.end():]
         else:
             name_pat = rf"(?i)(?:\b{re.escape(label)}\b[\s\S]*?)(?=\n\s*(?:\[Subject|[A-Z][a-z]+|\n\n[a-z_]+:)|\Z)"
             name_match = re.search(name_pat, prompt_result)
             if name_match:
                 body = name_match.group(0).strip()
                 block = f"[Subject {idx}: {label}]\n{body}\n{ref_line}\n\n"
-                prompt_result = (
-                    prompt_result[: name_match.start()]
-                    + block
-                    + prompt_result[name_match.end() :]
-                )
+                prompt_result = prompt_result[:name_match.start()] + block + prompt_result[name_match.end():]
 
-    prompt_result = re.sub(
-        r"speaking with <Audio \d+>:\s*", "speaking: ", prompt_result
-    )
+    prompt_result = re.sub(r"speaking with <Audio \d+>:\s*", "speaking: ", prompt_result)
     prompt_result = re.sub(r'"<([^>]+)>"', r'"\1"', prompt_result)
-    prompt_result = re.sub(
-        r"(?m)^\[Subject\s*\d+:[^\]]+\]\s*$(?=\n\s*\[Subject)", "", prompt_result
-    )
-    prompt_result = re.sub(
-        r"(?:,\s*speaking(?:[^\n:]*)?:?|,\s*delivering[^\n:]*:?|,\s*speaking the"
-        r" line:?)+\s*(visibly opening and moving mouth in natural anime"
-        r" lip-sync articulation while speaking:)",
-        r", \1",
-        prompt_result,
-        flags=re.IGNORECASE,
-    )
-    prompt_result = re.sub(
-        r"^(summary:)\s*\n+", r"\1\n", prompt_result, flags=re.MULTILINE | re.IGNORECASE
-    )
+    prompt_result = re.sub(r"(?m)^\[Subject\s*\d+:[^\]]+\]\s*$(?=\n\s*\[Subject)", "", prompt_result)
+    prompt_result = re.sub(r"^(summary:)\s*\n+", r"\1\n", prompt_result, flags=re.MULTILINE | re.IGNORECASE)
     prompt_result = re.sub(r"\n{3,}", "\n\n", prompt_result).strip()
     return prompt_result
 
@@ -681,19 +612,23 @@ class H3PromptDirectorGUI:
                 "shot1_enabled": ("BOOLEAN", {"default": True}),
                 "shot1_time": ("STRING", {"default": "0秒〜3秒"}),
                 "shot1_action": ("STRING", {"multiline": True, "default": ""}),
-                "shot1_dialogue": ("STRING", {"multiline": True, "default": "S1: "}),
+                "shot1_speaker": ("STRING", {"default": "S1"}),
+                "shot1_dialogue": ("STRING", {"multiline": True, "default": ""}),
                 "shot2_enabled": ("BOOLEAN", {"default": False}),
                 "shot2_time": ("STRING", {"default": "3秒〜7秒"}),
                 "shot2_action": ("STRING", {"multiline": True, "default": ""}),
-                "shot2_dialogue": ("STRING", {"multiline": True, "default": "S2: "}),
+                "shot2_speaker": ("STRING", {"default": "None"}),
+                "shot2_dialogue": ("STRING", {"multiline": True, "default": ""}),
                 "shot3_enabled": ("BOOLEAN", {"default": False}),
                 "shot3_time": ("STRING", {"default": "7秒〜10秒"}),
                 "shot3_action": ("STRING", {"multiline": True, "default": ""}),
-                "shot3_dialogue": ("STRING", {"multiline": True, "default": "S3: "}),
+                "shot3_speaker": ("STRING", {"default": "None"}),
+                "shot3_dialogue": ("STRING", {"multiline": True, "default": ""}),
                 "shot4_enabled": ("BOOLEAN", {"default": False}),
                 "shot4_time": ("STRING", {"default": "10秒〜15秒"}),
                 "shot4_action": ("STRING", {"multiline": True, "default": ""}),
-                "shot4_dialogue": ("STRING", {"multiline": True, "default": "S4: "}),
+                "shot4_speaker": ("STRING", {"default": "None"}),
+                "shot4_dialogue": ("STRING", {"multiline": True, "default": ""}),
             }
         }
 
@@ -757,158 +692,33 @@ class H3PromptDirectorGUI:
         return (prompt_result, media_bundle)
 
 class H3MediaDispatcher:
-
-  @classmethod
-  def INPUT_TYPES(cls):
-    return {
-        "required": {
-            "media_bundle": ("H3_MEDIA_BUNDLE",),
-            "width": (
-                "INT",
-                {"default": 1344, "min": 64, "max": 4096, "step": 32},
-            ),
-            "height": (
-                "INT",
-                {"default": 768, "min": 64, "max": 4096, "step": 32},
-            ),
-            "[FL2VA] リサイズ方式": (
-                ["crop", "pad", "stretch"],
-                {"default": "crop"},
-            ),
-            "[FL2VA] 基準位置": (
-                ["center", "top", "bottom", "left", "right"],
-                {"default": "center"},
-            ),
-            "[REF2VA] リサイズ方式": (
-                ["crop", "pad", "stretch"],
-                {"default": "crop"},
-            ),
-            "[REF2VA] 基準位置": (
-                ["center", "top", "bottom", "left", "right"],
-                {"default": "center"},
-            ),
-            "[V2V] リサイズ方式": (
-                ["crop", "pad", "stretch"],
-                {"default": "crop"},
-            ),
-            "[V2V] 基準位置": (
-                ["center", "top", "bottom", "left", "right"],
-                {"default": "center"},
-            ),
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "media_bundle": ("H3_MEDIA_BUNDLE",),
+                "width": ("INT", {"default": 1344, "min": 64, "max": 4096, "step": 32}),
+                "height": ("INT", {"default": 768, "min": 64, "max": 4096, "step": 32}),
+                "[FL2VA] リサイズ方式": (["crop", "pad", "stretch"], {"default": "crop"}),
+                "[FL2VA] 基準位置": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
+                "[REF2VA] リサイズ方式": (["crop", "pad", "stretch"], {"default": "crop"}),
+                "[REF2VA] 基準位置": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
+                "[V2V] リサイズ方式": (["crop", "pad", "stretch"], {"default": "crop"}),
+                "[V2V] 基準位置": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
+            }
         }
-    }
 
-  RETURN_TYPES = (
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "IMAGE",
-      "AUDIO",
-      "AUDIO",
-      "AUDIO",
-  )
-  RETURN_NAMES = (
-      "first_frame",
-      "last_frame",
-      "ref_image_0",
-      "ref_image_1",
-      "ref_image_2",
-      "ref_image_3",
-      "ref_image_4",
-      "ref_image_5",
-      "ref_image_6",
-      "ref_image_7",
-      "ref_image_8",
-      "ref_video_0",
-      "ref_video_1",
-      "ref_audio_0",
-      "ref_audio_1",
-      "ref_audio_2",
-  )
-  FUNCTION = "dispatch_all"
-  CATEGORY = "MiniMax_H3"
-
-  def dispatch_all(self, media_bundle, width, height, **kwargs):
-    fl2va_mode = kwargs.get("[FL2VA] リサイズ方式", "crop")
-    fl2va_pos = kwargs.get("[FL2VA] 基準位置", "center")
-    ref2va_mode = kwargs.get("[REF2VA] リサイズ方式", "crop")
-    ref2va_pos = kwargs.get("[REF2VA] 基準位置", "center")
-    v2v_mode = kwargs.get("[V2V] リサイズ方式", "crop")
-    v2v_pos = kwargs.get("[V2V] 基準位置", "center")
-
-    images = media_bundle.get("images", {})
-    keyframes = media_bundle.get("keyframes", {})
-    videos = media_bundle.get("videos", {})
-    audios = media_bundle.get("audios", {})
-
-    first_frame = None
-    if 0 in keyframes and keyframes[0] is not None:
-      first_frame = universal_resize(
-          keyframes[0], width, height, mode=fl2va_mode, crop_pos=fl2va_pos
-      )
-
-    last_frame = None
-    if 1 in keyframes and keyframes[1] is not None:
-      last_frame = universal_resize(
-          keyframes[1], width, height, mode=fl2va_mode, crop_pos=fl2va_pos
-      )
-
-    ref_imgs = []
-    for i in range(9):
-      if i in images and images[i] is not None:
-        ref_imgs.append(
-            universal_resize(
-                images[i], width, height, mode=ref2va_mode, crop_pos=ref2va_pos
-            )
-        )
-      else:
-        ref_imgs.append(None)
-
-    ref_video_0 = (
-        process_video_tensor(
-            videos.get(0), width, height, mode=v2v_mode, crop_pos=v2v_pos
-        )
-        if 0 in videos
-        else None
+    RETURN_TYPES = (
+        "IMAGE", "IMAGE",
+        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
+        "IMAGE", "IMAGE",
+        "AUDIO", "AUDIO", "AUDIO",
     )
-    ref_video_1 = (
-        process_video_tensor(
-            videos.get(1), width, height, mode=v2v_mode, crop_pos=v2v_pos
-        )
-        if 1 in videos
-        else None
-    )
-
-    ref_audio_0 = audios.get(0)
-    ref_audio_1 = audios.get(1)
-    ref_audio_2 = audios.get(2)
-
-    return (
-        first_frame,
-        last_frame,
-        ref_imgs[0],
-        ref_imgs[1],
-        ref_imgs[2],
-        ref_imgs[3],
-        ref_imgs[4],
-        ref_imgs[5],
-        ref_imgs[6],
-        ref_imgs[7],
-        ref_imgs[8],
-        ref_video_0,
-        ref_video_1,
-        ref_audio_0,
-        ref_audio_1,
-        ref_audio_2,
+    RETURN_NAMES = (
+        "first_frame", "last_frame",
+        "ref_image_0", "ref_image_1", "ref_image_2", "ref_image_3", "ref_image_4", "ref_image_5", "ref_image_6", "ref_image_7", "ref_image_8",
+        "ref_video_0", "ref_video_1",
+        "ref_audio_0", "ref_audio_1", "ref_audio_2",
     )
     FUNCTION = "dispatch_all"
     CATEGORY = "MiniMax_H3"
@@ -938,16 +748,16 @@ class H3MediaDispatcher:
                 keyframes[1], width, height, mode=fl2va_mode, crop_pos=fl2va_pos
             )
 
-        batch_list = []
+        ref_imgs = []
         for i in range(9):
             if i in images and images[i] is not None:
-                batch_list.append(
+                ref_imgs.append(
                     universal_resize(
                         images[i], width, height, mode=ref2va_mode, crop_pos=ref2va_pos
                     )
                 )
-
-        ref_images_batch = torch.cat(batch_list, dim=0) if batch_list else None
+            else:
+                ref_imgs.append(None)
 
         ref_video_0 = (
             process_video_tensor(
@@ -971,12 +781,10 @@ class H3MediaDispatcher:
         return (
             first_frame,
             last_frame,
-            ref_images_batch,
-            ref_video_0,
-            ref_video_1,
-            ref_audio_0,
-            ref_audio_1,
-            ref_audio_2,
+            ref_imgs[0], ref_imgs[1], ref_imgs[2], ref_imgs[3], ref_imgs[4],
+            ref_imgs[5], ref_imgs[6], ref_imgs[7], ref_imgs[8],
+            ref_video_0, ref_video_1,
+            ref_audio_0, ref_audio_1, ref_audio_2,
         )
 
 class HKMC_ModelSelector:
@@ -998,7 +806,6 @@ class HKMC_ModelSelector:
 
     def select_model(self, mode, ref2va_model, fl2va_model, hybrid_model):
         mode_clean = str(mode).strip().upper()
-        
         if "FL2VA" in mode_clean or "I2VA" in mode_clean:
             chosen_model = fl2va_model
             mode_name = "FL2VA"
@@ -1008,19 +815,6 @@ class HKMC_ModelSelector:
         else:
             chosen_model = ref2va_model
             mode_name = "REF2VA"
-
-        # --- モデル情報をコンソールに出力 ---
-        unet_name = "Unknown"
-        try:
-            # UNETLoaderで読み込んだモデルのファイル名を取得
-            unet_name = chosen_model.model.model_config.unet_config.get("model_name", "Standard")
-        except Exception:
-            pass
-
-        print(f"\n" + "="*50)
-        print(f" [HKMC Model Selector] Mode: {mode_name}")
-        print(f" [HKMC Model Selector] Routing Model -> {chosen_model}")
-        print(f"="*50 + "\n")
 
         return (chosen_model,)
 
