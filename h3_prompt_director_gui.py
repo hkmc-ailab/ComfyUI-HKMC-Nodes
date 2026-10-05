@@ -218,12 +218,7 @@ def build_and_generate_prompt(kwargs):
 
         name = kwargs.get(f"char{i}_name", "").strip()
         audio_ref = kwargs.get(f"char{i}_audio", "None")
-        if not audio_ref or audio_ref not in [
-            "None",
-            "<Audio 0>",
-            "<Audio 1>",
-            "<Audio 2>",
-        ]:
+        if not audio_ref or audio_ref not in ["None", "<Audio 0>", "<Audio 1>", "<Audio 2>"]:
             audio_ref = "None"
 
         extra = kwargs.get(f"char{i}_extra", "").strip()
@@ -235,21 +230,10 @@ def build_and_generate_prompt(kwargs):
         if base_text:
             desc_parts.append(base_text)
         if extra:
-            desc_parts.append(
-                "[Extra Details - STRICTLY TRANSLATE INTO ENGLISH WITHOUT"
-                f" INTERPRETATION]:\n{extra}"
-            )
+            desc_parts.append(f"[Extra Details - STRICTLY TRANSLATE INTO ENGLISH WITHOUT INTERPRETATION]:\n{extra}")
 
         subj_idx = len(subjects) + 1
-        label = (
-            name
-            if name
-            else (
-                preset
-                if preset not in ["None", "Custom Text"]
-                else f"Character {i}"
-            )
-        )
+        label = name if name else (preset if preset not in ["None", "Custom Text"] else f"Character {i}")
 
         pics_str = ""
         if pic_tags:
@@ -273,14 +257,13 @@ def build_and_generate_prompt(kwargs):
     char_description = process_wildcards("\n\n".join(subjects))
 
     shots = []
-    shot_has_dialogue = {}
+    saved_dialogues = {}
 
     shot_counter = 0
     for i in range(1, 5):
         if not kwargs.get(f"shot{i}_enabled", False):
             continue
         shot_counter += 1
-        current_shot_idx = shot_counter
 
         raw_time = kwargs.get(f"shot{i}_time", "").strip()
         norm_time = normalize_time_expression(raw_time)
@@ -293,63 +276,38 @@ def build_and_generate_prompt(kwargs):
         if action:
             content.append(f"Action/Camera: {action}")
 
-        has_dia = False
+        dia_lines = []
         if dialogue_raw:
             lines = [l.strip() for l in dialogue_raw.split("\n") if l.strip()]
             for line in lines:
                 dia = line
                 dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
-                dia = re.sub(
-                    r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*",
-                    "",
-                    dia,
-                    flags=re.IGNORECASE,
-                )
-                dia = re.sub(
-                    r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE
-                ).strip().strip('"').strip("'")
+                dia = re.sub(r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*", "", dia, flags=re.IGNORECASE)
+                dia = re.sub(r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE).strip().strip('"').strip("'")
 
                 if dia:
-                    has_dia = True
                     if speaker_choice in ["S1", "S2", "S3"]:
-                        formatted_line = f"Dialogue: {speaker_choice}: <d>[Japanese] {dia} </d>"
+                        dia_lines.append(f"{speaker_choice}: <d>[Japanese] {dia} </d>")
                     else:
-                        formatted_line = f"Dialogue: <d>[Japanese] {dia} </d>"
-                    content.append(formatted_line)
+                        dia_lines.append(f"<d>[Japanese] {dia} </d>")
+                    content.append(f"(Note for translation: Character {speaker_choice} is speaking here. Describe them visibly talking.)")
 
-        shot_has_dialogue[current_shot_idx] = has_dia
+        saved_dialogues[shot_counter] = dia_lines
+
         if content:
-            shots.append(f"[Shot {current_shot_idx} | {norm_time}]\n" + "\n".join(content))
+            shots.append(f"[Shot {shot_counter} | {norm_time}]\n" + "\n".join(content))
         else:
-            shots.append(f"[Shot {current_shot_idx} | {norm_time}]\nAction/Camera: Continuous action.")
+            shots.append(f"[Shot {shot_counter} | {norm_time}]\nAction/Camera: Continuous action.")
 
     timeline_seq = "\n\n".join(shots)
 
     creative_mode = kwargs.get("creative_mode", "オフ")
     if creative_mode == "リッチ (小物・情景追加)":
-        creative_instruction = (
-            "\n[SCENE DIRECTION & ATMOSPHERE ENHANCEMENT]:\n- Act as a master anime"
-            " scene director. ACTIVELY ENHANCE THE SCENE by adding fitting thematic"
-            " props, background furniture, atmospheric lighting, and contextual"
-            " environment elements that complement the scene.\n- **CRITICAL RULE:"
-            " YOU MUST APPLY THIS ENHANCEMENT EXCLUSIVELY TO THE `summary:`"
-            " SECTION. DO NOT TOUCH OTHER SECTIONS.**"
-        )
+        creative_instruction = "- Act as a master anime scene director. ACTIVELY ENHANCE THE SCENE by adding fitting thematic props, background furniture, atmospheric lighting, and contextual environment elements to the summary."
     elif creative_mode == "控えめ (光・空気感)":
-        creative_instruction = (
-            "\n[SCENE DIRECTION & ATMOSPHERE ENHANCEMENT]:\n- Subtly enhance the"
-            " atmosphere by adding cinematic lighting, time of day, and"
-            " environmental ambiance (e.g., warm golden hour, gentle rim"
-            " lighting).\n- **CRITICAL RULE: YOU MUST APPLY THIS ENHANCEMENT"
-            " EXCLUSIVELY TO THE `summary:` SECTION. DO NOT TOUCH OTHER"
-            " SECTIONS.**"
-        )
+        creative_instruction = "- Subtly enhance the atmosphere by adding cinematic lighting, time of day, and environmental ambiance (e.g., warm golden hour, gentle rim lighting) to the summary."
     else:
-        creative_instruction = (
-            "\n[SCENE DIRECTION & ATMOSPHERE ENHANCEMENT]:\n- Strictly translate"
-            " the situation faithfully without inventing unmentioned objects or"
-            " extra atmospheric effects."
-        )
+        creative_instruction = "- Strictly translate the situation faithfully without inventing unmentioned objects or extra atmospheric effects."
 
     raw_rules = load_system_rules()
     sys_inst = raw_rules.format(
@@ -368,9 +326,7 @@ def build_and_generate_prompt(kwargs):
     temp = 0.7 if creative_mode != "オフ" else 0.3
 
     if provider == "Gemini (Cloud)":
-        active_key = (
-            api_key if api_key and api_key.strip() else os.getenv("GEMINI_API_KEY")
-        )
+        active_key = api_key if api_key and api_key.strip() else os.getenv("GEMINI_API_KEY")
         if not active_key:
             raise ValueError("Gemini API Keyが設定されていません。")
         genai.configure(api_key=active_key)
@@ -378,9 +334,7 @@ def build_and_generate_prompt(kwargs):
         prompt_result = model.generate_content(sys_inst).text.strip()
 
     elif provider == "ChatGPT (OpenAI)":
-        active_key = (
-            api_key if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY")
-        )
+        active_key = api_key if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY")
         if not active_key:
             raise ValueError("OpenAI API Keyが設定されていません。")
         client = OpenAI(api_key=active_key)
@@ -388,10 +342,7 @@ def build_and_generate_prompt(kwargs):
             model=model_name or "gpt-4o",
             messages=[{
                 "role": "system",
-                "content": (
-                    "You are an expert prompt engineer specialized in the MiniMax"
-                    " H3 video generation model."
-                ),
+                "content": "You are an expert prompt engineer specialized in the MiniMax H3 video generation model.",
             }, {"role": "user", "content": sys_inst}],
             temperature=temp,
         )
@@ -412,123 +363,60 @@ def build_and_generate_prompt(kwargs):
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
-    for shot_idx, has_dia in shot_has_dialogue.items():
-        if not has_dia:
-            shot_pat = rf"(\[Shot\s*{shot_idx}\b[^\]]*\])([\s\S]*?)(?=\[Shot\s*\d+\b|\n\n[a-z_]+:|\Z)"
-            def strip_hallucinated_dialogue(m):
-                header = m.group(1)
-                body = m.group(2)
-                body = re.sub(r"(?:S\d+:\s*)?<d>.*?</d>", "", body, flags=re.DOTALL)
-                body = re.sub(r"(?:S\d+:\s*)?\[d\].*?\[\/d\]", "", body, flags=re.DOTALL)
-                body = re.sub(r"^\s*S\d+:\s*$", "", body, flags=re.MULTILINE)
-                return header + body
-            prompt_result = re.sub(shot_pat, strip_hallucinated_dialogue, prompt_result, flags=re.IGNORECASE)
+    prompt_result = re.sub(r"\[OUTPUT TEMPLATE - YOU MUST FILL THIS OUT EXACTLY IN ENGLISH\]\s*", "", prompt_result, flags=re.IGNORECASE)
+    prompt_result = re.sub(r"-\s*Act as a master anime scene director[\s\S]*?(?=\n\s*retention_analysis:)", "", prompt_result, flags=re.IGNORECASE)
+    prompt_result = re.sub(r"-\s*Subtly enhance the atmosphere[\s\S]*?(?=\n\s*retention_analysis:)", "", prompt_result, flags=re.IGNORECASE)
 
-    prompt_result = re.sub(r"\[d\]\s*\[Japanese\]", r"<d>[Japanese]", prompt_result, flags=re.IGNORECASE)
-    prompt_result = re.sub(r"\[d\]", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE)
-    prompt_result = re.sub(r"\[\/d\]", r"</d>", prompt_result, flags=re.IGNORECASE)
-    prompt_result = re.sub(r"<d>\s*(?!\[Japanese\])", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE)
-
-    prompt_result = re.sub(
-        r"[\s,]*(?:visibly opening and moving mouth.*?while (?:speaking|delivering line):?|speaking:|delivering line:?|saying:?)\s*(S\d+:\s*<d>\[Japanese\])",
-        r".\n\n\1",
-        prompt_result,
-        flags=re.IGNORECASE
-    )
-    prompt_result = re.sub(r"(?<!\n)(S\d+:\s*<d>\[Japanese\])", r"\n\n\1", prompt_result)
-    prompt_result = re.sub(r"(<\/d>)(?!\s*\n)", r"\1\n\n", prompt_result)
-
+    prompt_result = re.sub(r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$", "", prompt_result)
+    prompt_result = re.sub(r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$", "", prompt_result)
+    prompt_result = re.sub(r"(?im)^Vocal reference for\s+[\w\s]+\s+is\s+<Audio\s*\d+>.*$", "", prompt_result)
     prompt_result = re.sub(r"Action/Camera:\s*", "", prompt_result)
-    prompt_result = re.sub(r"Dialogue:\s*", "", prompt_result)
-    prompt_result = re.sub(r"禁止事項(?:＆|&)?スタイル維持:?", "", prompt_result)
-    prompt_result = re.sub(r"\[S\d+:?\]\s*", "", prompt_result)
-    prompt_result = re.sub(
-        r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$",
-        "",
-        prompt_result,
-    )
-    prompt_result = re.sub(
-        r"(?im)^Vocal reference for\s+[\w\s]+\s+is\s+<Audio\s*\d+>.*$",
-        "",
-        prompt_result,
-    )
 
-    if "summary:" not in prompt_result.lower():
-        prompt_result = re.sub(
-            r"(\n\n)([^\n]+)(\n+retention_analysis:)",
-            r"\1summary:\n\2\3",
-            prompt_result,
-            flags=re.IGNORECASE,
-        )
+    for shot_idx, dia_lines in saved_dialogues.items():
+        if not dia_lines:
+            continue
+            
+        start_marker = f"[Shot {shot_idx}"
+        start_idx = prompt_result.find(start_marker)
+        
+        if start_idx != -1:
+            next_shot_idx = prompt_result.find(f"[Shot {shot_idx + 1}", start_idx)
+            
+            sec_positions = []
+            for sec_name in ["overall_soundscape", "non_diegetic_music", "retention_analysis"]:
+                m = re.search(rf"(?i)(\[{sec_name}\]|{sec_name}:)", prompt_result[start_idx:])
+                if m:
+                    sec_positions.append(start_idx + m.start())
+            
+            next_sec_idx = min(sec_positions) if sec_positions else len(prompt_result)
+            end_idx = next_shot_idx if next_shot_idx != -1 else next_sec_idx
 
-    def clean_summary_content(match):
-        body = match.group(2)
-        body = re.sub(r"<d>.*?</d>", "", body, flags=re.DOTALL)
-        body = re.sub(r"S\d+:.*?(?=\.|\n|$)", "", body)
-        clean_text = "\n".join([line.strip() for line in body.splitlines() if line.strip()])
-        return f"summary:\n{clean_text}\n\n"
+            shot_text = prompt_result[start_idx:end_idx].rstrip()
+            injected_dialogues = "\n" + "\n".join(dia_lines) + "\n\n"
+            prompt_result = prompt_result[:start_idx] + shot_text + injected_dialogues + prompt_result[end_idx:]
 
-    prompt_result = re.sub(
-        r"(summary:\s*)(.*?)(?=\n\s*retention_analysis:)",
-        clean_summary_content,
-        prompt_result,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    prompt_result = re.sub(r"\[Subject\s*\d+:\s*([^\]]+)\]", r"\1", prompt_result)
-    prompt_result = re.sub(r"\[S\d+:\s*([^\]]+)\]", r"\1", prompt_result)
-
-    if shots:
-        for idx, shot_text in enumerate(shots, start=1):
-            time_tag_match = re.search(rf"\[Shot\s*{idx}\s*\|\s*[^\]]+\]", shot_text)
-            if time_tag_match:
-                time_header = time_tag_match.group(0)
-                if f"[Shot {idx}" not in prompt_result:
-                    spk_target = f"S{idx}:"
-                    pattern = rf"(?:\n|\A)([^\n]*?{spk_target}\s*<d>)"
-                    if re.search(pattern, prompt_result):
-                        prompt_result = re.sub(pattern, rf"\n\n{time_header}\n\1", prompt_result, count=1)
-
-    prompt_result = re.sub(r"(?<!<)\bPicture\s*(\d+)\b(?!>)", r"<Picture \1>", prompt_result)
-    prompt_result = re.sub(r"(?<!<)\bAudio\s*(\d+)\b(?!>)", r"<Audio \1>", prompt_result)
-    prompt_result = re.sub(r"(<\/d>)\s*\([^)]+\)", r"\1", prompt_result)
-    prompt_result = re.sub(r"\bSX:\s*", "", prompt_result)
-
-    # 5. キャラクター参照の注入
     for idx, refs in sorted(char_refs.items(), key=lambda x: x[0]):
         label = refs["label"]
-        extra_text = refs.get("extra", "")
-
+        
         ref_parts = []
         if refs["pics"]:
             ref_parts.append(f"Reference sheets for {label} include {refs['pics_str']}.")
         if refs["audio"] and refs["audio"] != "None":
             ref_parts.append(f"Vocal reference for {label} is {refs['audio']}.")
         ref_line = " ".join(ref_parts)
+        if not ref_line:
+            continue
 
-        subj_pat = rf"(\[Subject\s*{idx}\s*:[^\]]*\])(.*?)(?=\n\s*\[Subject|\n\n[a-z_]+:|\Z)"
-        match = re.search(subj_pat, prompt_result, re.DOTALL | re.IGNORECASE)
+        subj_pat = rf"(?i)(\[Subject\s*{idx}:?[^\]]*\][\s\S]*?)(?=\n\s*\[Subject|\n\s*\[?summary\]?:|\Z)"
+        match = re.search(subj_pat, prompt_result)
 
         if match:
-            header = f"[Subject {idx}: {label}]"
-            body = match.group(2).strip()
-            for p in refs["pics"]:
-                if p in extra_text and p not in body:
-                    body += f" {p} shows the same character's appearance and reference angles."
-            new_body = f"{body}\n{ref_line}\n"
-            prompt_result = prompt_result[:match.start()] + header + "\n" + new_body + prompt_result[match.end():]
-        else:
-            name_pat = rf"(?i)(?:\b{re.escape(label)}\b[\s\S]*?)(?=\n\s*(?:\[Subject|[A-Z][a-z]+|\n\n[a-z_]+:)|\Z)"
-            name_match = re.search(name_pat, prompt_result)
-            if name_match:
-                body = name_match.group(0).strip()
-                block = f"[Subject {idx}: {label}]\n{body}\n{ref_line}\n\n"
-                prompt_result = prompt_result[:name_match.start()] + block + prompt_result[name_match.end():]
+            block = match.group(1).rstrip()
+            prompt_result = prompt_result[:match.start()] + block + f"\n{ref_line}\n\n" + prompt_result[match.end():]
 
-    prompt_result = re.sub(r"speaking with <Audio \d+>:\s*", "speaking: ", prompt_result)
-    prompt_result = re.sub(r'"<([^>]+)>"', r'"\1"', prompt_result)
-    prompt_result = re.sub(r"(?m)^\[Subject\s*\d+:[^\]]+\]\s*$(?=\n\s*\[Subject)", "", prompt_result)
     prompt_result = re.sub(r"^(summary:)\s*\n+", r"\1\n", prompt_result, flags=re.MULTILINE | re.IGNORECASE)
     prompt_result = re.sub(r"\n{3,}", "\n\n", prompt_result).strip()
+
     return prompt_result
 
 @PromptServer.instance.routes.post("/h3/generate_prompt")
