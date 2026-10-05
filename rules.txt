@@ -40,8 +40,15 @@ non_diegetic_music:
 
 - `detailed_description:`
   MUST include EVERY shot header from "Movement & Timing" exactly as given (e.g., `[Shot 1 | 0:00.0-0:04.0]`). NEVER omit shot headers.
+  
+  [CRITICAL: DO NOT SUMMARIZE OR SHORTEN ACTIONS - EXPAND RICHLY]:
+  - NEVER compress or omit the user's action/camera descriptions into a single generic sentence!
+  - Fully translate and richly flesh out EVERY SINGLE camera movement, transition cue, angle change, lens framing, and character micro-action provided in the input.
+  - If the user specifies continuous one-take motion, smooth arcs, specific rotational angles, or facial focus shifts, you MUST explicitly describe each of those details using professional cinematographic terms (e.g., "seamless one-take tracking shot", "smooth orbital camera sweep executing a continuous 180-degree arc from rear to frontal view", "dynamic rack focus transitioning from low-angle legs to tight facial framing").
+  - Each shot's action description should be a detailed, expressive multi-sentence paragraph (at least 2 to 4 detailed sentences) faithfully incorporating every detail the user wrote.
+
   Format actions and dialogue strictly as separate lines:
-  [CharacterName] [Action Description translated in English].
+  [CharacterName] [Richly detailed Action & Camera Description translated in English].
   SX: <d>[Japanese] ExactJapaneseDialogue </d>
 
   CRITICAL RULES FOR DIALOGUE & SPEAKERS:
