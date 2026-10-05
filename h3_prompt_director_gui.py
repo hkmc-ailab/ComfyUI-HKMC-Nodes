@@ -273,11 +273,15 @@ def build_and_generate_prompt(kwargs):
     char_description = process_wildcards("\n\n".join(subjects))
 
     shots = []
-    ordered_dialogues = []
+    shot_has_dialogue = {}
 
+    shot_counter = 0
     for i in range(1, 5):
         if not kwargs.get(f"shot{i}_enabled", False):
             continue
+        shot_counter += 1
+        current_shot_idx = shot_counter
+
         raw_time = kwargs.get(f"shot{i}_time", "").strip()
         norm_time = normalize_time_expression(raw_time)
 
@@ -287,12 +291,13 @@ def build_and_generate_prompt(kwargs):
 
         content = []
         if action:
-            content.append(action)
+            content.append(f"Action/Camera: {action}")
+
+        has_dia = False
         if dialogue_raw:
             lines = [l.strip() for l in dialogue_raw.split("\n") if l.strip()]
             for line in lines:
                 dia = line
-                # ユーザーが誤ってS1:などを手入力していても除去
                 dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
                 dia = re.sub(
                     r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*",
@@ -305,21 +310,19 @@ def build_and_generate_prompt(kwargs):
                 ).strip().strip('"').strip("'")
 
                 if dia:
-                    # 話者が指定されている場合はプレフィックスを自動付与
+                    has_dia = True
                     if speaker_choice in ["S1", "S2", "S3"]:
-                        formatted_line = f"{speaker_choice}: <d>[Japanese] {dia} </d>"
+                        formatted_line = f"Dialogue: {speaker_choice}: <d>[Japanese] {dia} </d>"
                     else:
-                        formatted_line = f"<d>[Japanese] {dia} </d>"
-
+                        formatted_line = f"Dialogue: <d>[Japanese] {dia} </d>"
                     content.append(formatted_line)
-                    ordered_dialogues.append({
-                        "shot": len(shots) + 1,
-                        "speaker": speaker_choice if speaker_choice != "None" else f"S{i}",
-                        "dialogue": dia,
-                        "full": formatted_line,
-                    })
+
+        shot_has_dialogue[current_shot_idx] = has_dia
         if content:
-            shots.append(f"[Shot {len(shots) + 1} | {norm_time}]\n" + "\n".join(content))
+            shots.append(f"[Shot {current_shot_idx} | {norm_time}]\n" + "\n".join(content))
+        else:
+            shots.append(f"[Shot {current_shot_idx} | {norm_time}]\nAction/Camera: Continuous action.")
+
     timeline_seq = "\n\n".join(shots)
 
     creative_mode = kwargs.get("creative_mode", "オフ")
@@ -409,49 +412,34 @@ def build_and_generate_prompt(kwargs):
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
-    # 1. タグ表記の揺らぎを修正
+    for shot_idx, has_dia in shot_has_dialogue.items():
+        if not has_dia:
+            shot_pat = rf"(\[Shot\s*{shot_idx}\b[^\]]*\])([\s\S]*?)(?=\[Shot\s*\d+\b|\n\n[a-z_]+:|\Z)"
+            def strip_hallucinated_dialogue(m):
+                header = m.group(1)
+                body = m.group(2)
+                body = re.sub(r"(?:S\d+:\s*)?<d>.*?</d>", "", body, flags=re.DOTALL)
+                body = re.sub(r"(?:S\d+:\s*)?\[d\].*?\[\/d\]", "", body, flags=re.DOTALL)
+                body = re.sub(r"^\s*S\d+:\s*$", "", body, flags=re.MULTILINE)
+                return header + body
+            prompt_result = re.sub(shot_pat, strip_hallucinated_dialogue, prompt_result, flags=re.IGNORECASE)
+
     prompt_result = re.sub(r"\[d\]\s*\[Japanese\]", r"<d>[Japanese]", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"\[d\]", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"\[\/d\]", r"</d>", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"<d>\s*(?!\[Japanese\])", r"<d>[Japanese] ", prompt_result, flags=re.IGNORECASE)
 
-    # 2. リップシンク構文の分離（TTS巻き込み誤読防止のため「speaking:」等を削り、前後に空行を確保）
     prompt_result = re.sub(
         r"[\s,]*(?:visibly opening and moving mouth.*?while (?:speaking|delivering line):?|speaking:|delivering line:?|saying:?)\s*(S\d+:\s*<d>\[Japanese\])",
         r".\n\n\1",
         prompt_result,
         flags=re.IGNORECASE
     )
-    
-    # セリフタグの直前に空行がない場合は挿入
-    prompt_result = re.sub(
-        r"(?<!\n)(S\d+:\s*<d>\[Japanese\])",
-        r"\n\n\1",
-        prompt_result
-    )
-    
-    # セリフタグの直後に空行がない場合は挿入
-    prompt_result = re.sub(
-        r"(<\/d>)(?!\s*\n)",
-        r"\1\n\n",
-        prompt_result
-    )
+    prompt_result = re.sub(r"(?<!\n)(S\d+:\s*<d>\[Japanese\])", r"\n\n\1", prompt_result)
+    prompt_result = re.sub(r"(<\/d>)(?!\s*\n)", r"\1\n\n", prompt_result)
 
-    # 3. LLMがセリフを秒数や英語に化けさせた場合、入力された純粋なセリフで順番通りに完全強制置換
-    if ordered_dialogues:
-        shot_dia_matches = list(re.finditer(r"(S\d+:\s*)?<d>\[Japanese\](.*?)<\/d>", prompt_result))
-        for idx, item in enumerate(ordered_dialogues):
-            if idx < len(shot_dia_matches):
-                target_match = shot_dia_matches[idx]
-                spk = item["speaker"]
-                correct_dia = item["dialogue"]
-                prefix = f"{spk}: " if spk != "None" else ""
-                replacement = f"{prefix}<d>[Japanese] {correct_dia} </d>"
-                prompt_result = prompt_result[:target_match.start()] + replacement + prompt_result[target_match.end():]
-                # 置換によるインデックスずれを再取得
-                shot_dia_matches = list(re.finditer(r"(S\d+:\s*)?<d>\[Japanese\](.*?)<\/d>", prompt_result))
-
-    # 4. 余分なタグやプレフィックスのクレンジング
+    prompt_result = re.sub(r"Action/Camera:\s*", "", prompt_result)
+    prompt_result = re.sub(r"Dialogue:\s*", "", prompt_result)
     prompt_result = re.sub(r"禁止事項(?:＆|&)?スタイル維持:?", "", prompt_result)
     prompt_result = re.sub(r"\[S\d+:?\]\s*", "", prompt_result)
     prompt_result = re.sub(
@@ -477,10 +465,6 @@ def build_and_generate_prompt(kwargs):
         body = match.group(2)
         body = re.sub(r"<d>.*?</d>", "", body, flags=re.DOTALL)
         body = re.sub(r"S\d+:.*?(?=\.|\n|$)", "", body)
-        body = re.sub(r"[^.\n]*visibly open[^.\n]*\.", "", body, flags=re.IGNORECASE)
-        body = re.sub(r"[^.\n]*while speaking:?[^.\n]*\.", "", body, flags=re.IGNORECASE)
-        body = re.sub(r"[^.\n]*while delivering line:?[^.\n]*\.", "", body, flags=re.IGNORECASE)
-        body = re.sub(r"Thematic props include.*?tank top.*?\.", "", body, flags=re.IGNORECASE)
         clean_text = "\n".join([line.strip() for line in body.splitlines() if line.strip()])
         return f"summary:\n{clean_text}\n\n"
 
