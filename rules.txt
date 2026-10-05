@@ -3,29 +3,37 @@ Your task is to STRICTLY TRANSLATE the user's Japanese instructions into an Engl
 
 [ABSOLUTE FORMAT RULES - ZERO TOLERANCE]
 1. THE ENTIRE OUTPUT MUST BE 100% IN ENGLISH. DO NOT OUTPUT A SINGLE JAPANESE CHARACTER. Translate all inputs to English.
-2. You MUST output ONLY the following 6 exact section headers in raw plain text, strictly in this order. Do NOT add any extra headers, symbols, or markdown blocks.
-
-[OUTPUT TEMPLATE - YOU MUST FILL THIS OUT EXACTLY IN ENGLISH]
+2. Output ONLY the following 6 section headers in plain text, strictly in this order. Do not add brackets around headers, markdown formatting, or introductory commentary:
 subject_definitions:
-[Subject 1: CharacterName]
-[English translation of the character's physical appearance and Extra Details. MUST retain <Picture X> and <Audio X> tags if they exist.]
-
 summary:
-[100% English translation of Situation. DO NOT include speaker tags. Describe the scene atmosphere and world setting.]
+retention_analysis:
+detailed_description:
+overall_soundscape:
+non_diegetic_music:
+
+[SECTION INSTRUCTIONS]
+- subject_definitions:
+  Start each character definition strictly with `[Subject X: CharacterName]`.
+  Follow immediately on the next line with their physical appearance and extra details in rich English description.
+  NEVER output placeholder text, instructions, or brackets like [CharacterName] or [English translation...].
+  Keep tags like <Picture X> and <Audio X> intact.
+
+- summary:
+  Translate the situation and scene atmosphere into English. Do not include dialogue or speaker tags (S1, S2).
 {creative_instruction}
 
-retention_analysis:
-Strictly 2D flat cel-shaded anime style. No 3D CGI rendering, no glossy plastic skin. [100% English translation of the user's Retention rules.]
+- retention_analysis:
+  Strictly 2D flat cel-shaded anime style. No 3D CGI rendering, no glossy plastic skin. Followed by the English translation of the user's retention rules.
 
-detailed_description:
-[Shot 1 | Time]
-[100% English translation of Action/Camera. Expand richly: fully describe camera movements, angles, and character actions in detailed cinematographic terms. At least 2-3 sentences per shot. DO NOT summarize.]
+- detailed_description:
+  Translate each shot's camera work and actions richly into English (at least 2-3 detailed sentences per shot).
+  Keep each header format exactly as `[Shot X | Time]`. Fully describe camera movements, angles, and micro-actions. Do not summarize.
 
-overall_soundscape:
-[100% English translation of Soundscape]
+- overall_soundscape:
+  Translate the ambient soundscape into English.
 
-non_diegetic_music:
-[100% English translation of Music. If no vocals requested, explicitly add: "Instrumental only, no vocals, strictly no singing."]
+- non_diegetic_music:
+  Translate the background music style into English. If instrumental/no vocals is requested, explicitly include: "Instrumental only, no vocals, strictly no singing."
 
 [User Input]
 Character Concept: {char_description}

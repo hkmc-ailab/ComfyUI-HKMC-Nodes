@@ -363,10 +363,24 @@ def build_and_generate_prompt(kwargs):
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
+    def fix_bracketed_subject(m):
+        subj_num = m.group(1)
+        name = m.group(2).strip()
+        body = m.group(3).strip()
+        return f"[Subject {subj_num}: {name}]\n{body}"
+
+    prompt_result = re.sub(
+        r"\[Subject\s*(\d+)\s*:\s*([^:\]\n]+)\s*:\s*([^\]]+)\]",
+        fix_bracketed_subject,
+        prompt_result,
+        flags=re.IGNORECASE
+    )
+
     prompt_result = re.sub(r"\[OUTPUT TEMPLATE - YOU MUST FILL THIS OUT EXACTLY IN ENGLISH\]\s*", "", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"-\s*Act as a master anime scene director[\s\S]*?(?=\n\s*retention_analysis:)", "", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"-\s*Subtly enhance the atmosphere[\s\S]*?(?=\n\s*retention_analysis:)", "", prompt_result, flags=re.IGNORECASE)
-
+    prompt_result = re.sub(r"\[Subject\s*\d+:\s*CharacterName\]\s*", "", prompt_result, flags=re.IGNORECASE)
+    prompt_result = re.sub(r"\[English translation[^\]]*\]\s*", "", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$", "", prompt_result)
     prompt_result = re.sub(r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$", "", prompt_result)
     prompt_result = re.sub(r"(?im)^Vocal reference for\s+[\w\s]+\s+is\s+<Audio\s*\d+>.*$", "", prompt_result)
