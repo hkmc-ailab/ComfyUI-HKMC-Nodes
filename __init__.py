@@ -18,6 +18,8 @@ from .h3_prompt_director_gui import (
     HKMC_ModelSelector,
 )
 from .save_audio_wav import SaveAudioWav
+from .h3_pipe import ToH3Pipe, FromH3Pipe, FromH3MediaPipe
+from .hkmc_group_switch import HKMCGroupSwitch
 
 NODE_CLASS_MAPPINGS = {
     "AnimaPromptDirector": AnimaPromptDirector,
@@ -31,6 +33,10 @@ NODE_CLASS_MAPPINGS = {
     "H3PromptDirectorGUI": H3PromptDirectorGUI,
     "HKMC_ModelSelector": HKMC_ModelSelector,
     "SaveAudioWav": SaveAudioWav,
+    "ToH3Pipe": ToH3Pipe,
+    "FromH3Pipe": FromH3Pipe,
+    "FromH3MediaPipe": FromH3MediaPipe,
+    "HKMCGroupSwitch": HKMCGroupSwitch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -45,6 +51,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3PromptDirectorGUI": "H3promptDirector(GUI)",
     "HKMC_ModelSelector": "HKMC Model Selector",
     "SaveAudioWav": "Save Audio (WAV)",
+    "ToH3Pipe": "To H3 Pipe",
+    "FromH3Pipe": "From H3 Pipe",
+    "FromH3MediaPipe": "From H3 Media Pipe",
+    "HKMCGroupSwitch": "HKMC Group Switch",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

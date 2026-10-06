@@ -595,12 +595,14 @@ class H3MediaDispatcher:
         }
 
     RETURN_TYPES = (
+        "H3_MEDIA_PIPE",  # 追記: 1本にまとめたパイプ線
         "IMAGE", "IMAGE",
         "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
         "IMAGE", "IMAGE",
         "AUDIO", "AUDIO", "AUDIO",
     )
     RETURN_NAMES = (
+        "media_pipe",     # 追記
         "first_frame", "last_frame",
         "ref_image_0", "ref_image_1", "ref_image_2", "ref_image_3", "ref_image_4", "ref_image_5", "ref_image_6", "ref_image_7", "ref_image_8",
         "ref_video_0", "ref_video_1",
@@ -664,7 +666,7 @@ class H3MediaDispatcher:
         ref_audio_1 = audios.get(1)
         ref_audio_2 = audios.get(2)
 
-        return (
+        raw_outputs = (
             first_frame,
             last_frame,
             ref_imgs[0], ref_imgs[1], ref_imgs[2], ref_imgs[3], ref_imgs[4],
@@ -672,6 +674,8 @@ class H3MediaDispatcher:
             ref_video_0, ref_video_1,
             ref_audio_0, ref_audio_1, ref_audio_2,
         )
+
+        return (raw_outputs,) + raw_outputs
 
 class HKMC_ModelSelector:
     @classmethod
