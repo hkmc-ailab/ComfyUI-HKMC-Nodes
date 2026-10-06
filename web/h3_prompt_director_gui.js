@@ -747,7 +747,6 @@ app.registerExtension({
                     return row;
                 };
 
-                // セリフ見出し ＋ 話者選択チップ ＋ セリフ入力欄 を1つのブロックとして構築
                 const createDialogueWithSpeaker = (shotIndex) => {
                     const block = document.createElement("div");
                     block.className = "h3-dialogue-block";
@@ -1363,9 +1362,18 @@ app.registerExtension({
 
                 node.setSize([720, 880]);
 
-                // ★ ノードのレイアウト崩れ（幅が半分になる現象）を防ぐ強制サイズロック
-                node.computeSize = function() {
-                    return [Math.max(720, this.size[0] || 720), Math.max(880, this.size[1] || 880)];
+                const onResize = node.onResize;
+                node.onResize = function (size) {
+                    // 最小サイズを保証
+                    if (size[0] < 720) size[0] = 720;
+                    if (size[1] < 880) size[1] = 880;
+                    
+                    if (root) {
+                        root.style.width = (size[0] - 20) + "px";
+                        root.style.height = (size[1] - 60) + "px"; 
+                    }
+                    
+                    if (onResize) onResize.apply(this, arguments);
                 };
 
                 renderTabContent();
@@ -1388,8 +1396,12 @@ app.registerExtension({
                     renderTabContent();
                     renderFixedMediaLanes();
                     
-                    if (node.size[0] < 720) {
-                        node.size[0] = 720;
+                    if (node.size[0] < 720 || node.size[1] < 880) {
+                        node.setSize([Math.max(720, node.size[0]), Math.max(880, node.size[1])]);
+                    }
+                    if (root) {
+                        root.style.width = (node.size[0] - 20) + "px";
+                        root.style.height = (node.size[1] - 60) + "px";
                     }
                 };
             };
