@@ -485,6 +485,26 @@ function installStudioStyles() {
             z-index: 2;
         }
         .h3-slot-del-btn:hover { background: #d32f2f; }
+        
+        .h3-clip-result-title {
+            font-size: 11px;
+            font-weight: bold;
+            color: #ffffff;
+            margin-top: 8px;
+        }
+        .h3-clip-result-text {
+            width: 100%;
+            min-height: 40px;
+            background: #181818;
+            border: 1px solid #383838;
+            border-radius: 8px;
+            color: #dbe0e6;
+            font-size: 10px;
+            padding: 8px;
+            box-sizing: border-box;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
     `;
     document.head.appendChild(style);
 }
@@ -503,6 +523,7 @@ app.registerExtension({
                 node.widgets.forEach(w => {
                     wMap[w.name] = w;
                     w.draw = function () {};
+                    // 【安定版の処理】LiteGraphのマージンを相殺する
                     w.computeSize = () => [0, -4];
                     if (w.inputEl) w.inputEl.style.display = "none";
                 });
@@ -517,19 +538,20 @@ app.registerExtension({
                         wMap[`shot${i}_enabled`].value = (i === 1);
                     }
                 }
+                for (let i = 1; i <= 10; i++) {
+                    if (wMap[`c${i}_enabled`] && wMap[`c${i}_enabled`].value === undefined) {
+                        wMap[`c${i}_enabled`].value = false;
+                    }
+                }
 
-                const charEnabledState = {
-                    1: wMap["char1_enabled"] ? !!wMap["char1_enabled"].value : true,
-                    2: wMap["char2_enabled"] ? !!wMap["char2_enabled"].value : false,
-                    3: wMap["char3_enabled"] ? !!wMap["char3_enabled"].value : false,
-                };
+                const charEnabledState = {};
+                for(let i=1; i<=3; i++) charEnabledState[i] = wMap[`char${i}_enabled`] ? !!wMap[`char${i}_enabled`].value : (i===1);
 
-                const shotEnabledState = {
-                    1: wMap["shot1_enabled"] ? !!wMap["shot1_enabled"].value : true,
-                    2: wMap["shot2_enabled"] ? !!wMap["shot2_enabled"].value : false,
-                    3: wMap["shot3_enabled"] ? !!wMap["shot3_enabled"].value : false,
-                    4: wMap["shot4_enabled"] ? !!wMap["shot4_enabled"].value : false,
-                };
+                const shotEnabledState = {};
+                for(let i=1; i<=4; i++) shotEnabledState[i] = wMap[`shot${i}_enabled`] ? !!wMap[`shot${i}_enabled`].value : (i===1);
+
+                const clipEnabledState = {};
+                for(let i=1; i<=10; i++) clipEnabledState[i] = wMap[`c${i}_enabled`] ? !!wMap[`c${i}_enabled`].value : false;
 
                 let activeTab = "cast";
                 let lastFocusedInput = null;
@@ -546,6 +568,10 @@ app.registerExtension({
                 const root = document.createElement("div");
                 root.className = "h3-studio-container";
 
+                // GUI全体を少し上へ移動
+                const GUI_Y_OFFSET = -14;
+                root.style.transform = `translateY(${GUI_Y_OFFSET}px)`;
+
                 const tabBar = document.createElement("div");
                 tabBar.className = "h3-tab-bar";
 
@@ -553,6 +579,7 @@ app.registerExtension({
                     { id: "cast", label: "キャラクター設定" },
                     { id: "timeline", label: "⏱タイムライン" },
                     { id: "scene", label: "演出＆メディア" },
+                    { id: "clip", label: "クリップ" },
                     { id: "llm", label: "LLM設定" },
                     { id: "prompt", label: "プロンプト生成" }
                 ];
@@ -573,11 +600,6 @@ app.registerExtension({
                             fixedMediaArea.style.display = "flex";
                         }
                         renderTabContent();
-                        
-                        if (node.size[0] < 720) {
-                            node.size[0] = 720;
-                            node.setDirtyCanvas(true, true);
-                        }
                     };
                     tabButtons[t.id] = btn;
                     tabBar.appendChild(btn);
@@ -860,7 +882,7 @@ app.registerExtension({
 
                     const syncToWidget = () => {
                         const smVal = parseInt(inSm.value) || 0;
-                        const ssVal = String(parseInt(inSs.value) || 0).padStart(2, "0");
+                        const ssVal = String(parseInt(inSm.value) || 0).padStart(2, "0");
                         const smsVal = parseInt(inSms.value) || 0;
 
                         const emVal = parseInt(inEm.value) || 0;
@@ -1093,6 +1115,94 @@ app.registerExtension({
                             bindInput("bgm", "BGM (劇伴音楽)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
                         );
 
+                    } else if (activeTab === "clip") {
+                        const toggleBar = document.createElement("div");
+                        toggleBar.className = "h3-top-toggle-bar";
+                        toggleBar.style.flexWrap = "wrap";
+                        toggleBar.style.marginBottom = "8px";
+
+                        const clipCards = {};
+
+                        for (let i = 1; i <= 10; i++) {
+                            const isChecked = !!clipEnabledState[i];
+                            const chip = document.createElement("div");
+                            chip.className = `h3-toggle-chip ${isChecked ? "active" : ""}`;
+                            chip.style.flex = "1 0 18%";
+                            
+                            const chk = document.createElement("input");
+                            chk.type = "checkbox";
+                            chk.checked = isChecked;
+
+                            const span = document.createElement("span");
+                            span.textContent = `C${i}`;
+
+                            chip.onclick = (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                clipEnabledState[i] = !clipEnabledState[i];
+                                const active = clipEnabledState[i];
+
+                                chip.className = `h3-toggle-chip ${active ? "active" : ""}`;
+                                chk.checked = active;
+
+                                if (wMap[`c${i}_enabled`]) {
+                                    wMap[`c${i}_enabled`].value = active;
+                                    if (wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(active);
+                                }
+
+                                if (clipCards[i]) {
+                                    clipCards[i].style.display = active ? "flex" : "none";
+                                }
+                            };
+
+                            chip.append(chk, span);
+                            toggleBar.appendChild(chip);
+                        }
+                        contentArea.appendChild(toggleBar);
+
+                        for (let i = 1; i <= 10; i++) {
+                            const card = document.createElement("div");
+                            card.className = "h3-char-card";
+                            card.style.display = clipEnabledState[i] ? "flex" : "none";
+
+                            const titleBar = document.createElement("div");
+                            titleBar.style.display = "flex";
+                            titleBar.style.alignItems = "center";
+                            titleBar.style.gap = "8px";
+
+                            const title = document.createElement("div");
+                            title.className = "h3-char-title";
+                            title.textContent = `クリップ ${i}`;
+
+                            const contWidget = wMap[`c${i}_continue`];
+                            const contLabel = document.createElement("label");
+                            contLabel.style.fontSize = "11px";
+                            contLabel.style.color = "#dbe0e6";
+                            contLabel.style.display = "flex";
+                            contLabel.style.alignItems = "center";
+                            contLabel.style.gap = "4px";
+                            contLabel.style.cursor = "pointer";
+
+                            const contChk = document.createElement("input");
+                            contChk.type = "checkbox";
+                            contChk.checked = contWidget ? !!contWidget.value : true;
+                            contChk.onchange = () => {
+                                if (contWidget) {
+                                    contWidget.value = contChk.checked;
+                                    if (contWidget.callback) contWidget.callback(contChk.checked);
+                                }
+                            };
+                            contLabel.append(contChk, document.createTextNode("前回の動画の続きを生成する"));
+
+                            titleBar.append(title, contLabel);
+
+                            const promptRow = bindInput(`c${i}_prompt`, null, true, "ここに日本語でプロンプトの指示を記入してください");
+
+                            card.append(titleBar, promptRow);
+                            contentArea.appendChild(card);
+                            clipCards[i] = card;
+                        }
+
                     } else if (activeTab === "llm") {
                         const titleLLM = document.createElement("div");
                         titleLLM.className = "h3-char-title";
@@ -1152,6 +1262,37 @@ app.registerExtension({
 
                         banner.append(chk, txtGroup);
 
+                        const clipResContainer = document.createElement("div");
+                        clipResContainer.style.display = "flex";
+                        clipResContainer.style.flexDirection = "column";
+                        clipResContainer.style.gap = "4px";
+
+                        const updateClipResultsUI = (clipData) => {
+                            clipResContainer.replaceChildren();
+                            if (!clipData || Object.keys(clipData).length === 0) return;
+                            
+                            for (let i = 1; i <= 10; i++) {
+                                if (clipData[i]) {
+                                    const t = document.createElement("div");
+                                    t.className = "h3-clip-result-title";
+                                    t.textContent = `クリップ ${i}`;
+                                    
+                                    const box = document.createElement("div");
+                                    box.className = "h3-clip-result-text";
+                                    box.textContent = clipData[i];
+                                    
+                                    clipResContainer.append(t, box);
+                                }
+                            }
+                        };
+
+                        const genClipWidget = wMap["generated_clip_prompts"];
+                        if (genClipWidget && genClipWidget.value) {
+                            try {
+                                updateClipResultsUI(JSON.parse(genClipWidget.value));
+                            } catch(e){}
+                        }
+
                         genBtn.onclick = async () => {
                             genBtn.disabled = true;
                             genBtn.innerHTML = `<span>⏳ プロンプト構築中... (LLM通信中)</span>`;
@@ -1163,6 +1304,7 @@ app.registerExtension({
 
                             for (let i = 1; i <= 3; i++) payload[`char${i}_enabled`] = charEnabledState[i];
                             for (let i = 1; i <= 4; i++) payload[`shot${i}_enabled`] = shotEnabledState[i];
+                            for (let i = 1; i <= 10; i++) payload[`c${i}_enabled`] = clipEnabledState[i];
 
                             try {
                                 const res = await api.fetchApi("/h3/generate_prompt", {
@@ -1171,12 +1313,23 @@ app.registerExtension({
                                     body: JSON.stringify(payload)
                                 });
                                 const data = await res.json();
-                                if (data.success && data.prompt) {
-                                    ta.value = data.prompt;
-                                    if (customWidget) {
-                                        customWidget.value = data.prompt;
-                                        if (customWidget.callback) customWidget.callback(data.prompt);
+                                if (data.success) {
+                                    if (data.prompt) {
+                                        ta.value = data.prompt;
+                                        if (customWidget) {
+                                            customWidget.value = data.prompt;
+                                            if (customWidget.callback) customWidget.callback(data.prompt);
+                                        }
                                     }
+                                    if (data.clip_prompts) {
+                                        const strData = JSON.stringify(data.clip_prompts);
+                                        if (genClipWidget) {
+                                            genClipWidget.value = strData;
+                                            if (genClipWidget.callback) genClipWidget.callback(strData);
+                                        }
+                                        updateClipResultsUI(data.clip_prompts);
+                                    }
+
                                     chk.checked = true;
                                     if (useWidget) {
                                         useWidget.value = true;
@@ -1193,7 +1346,7 @@ app.registerExtension({
                             }
                         };
 
-                        contentArea.append(titlePrompt, genBtn, banner, ta);
+                        contentArea.append(titlePrompt, genBtn, banner, ta, clipResContainer);
                     }
                 };
 
@@ -1352,6 +1505,7 @@ app.registerExtension({
                     mediaBody.append(imgBlock, kfBlock, vidBlock, audBlock);
                 };
 
+                // 【安定版の処理】DOMの追加 (余白などの計算を標準のLiteGraphに任せる)
                 if (node.addDOMWidget) {
                     node.addDOMWidget("studio_console_ui", "custom", root, {
                         serialize: false,
@@ -1360,17 +1514,18 @@ app.registerExtension({
                     });
                 }
 
-                node.setSize([720, 880]);
+                // 【安定版の処理】ノードの初期サイズ
+                node.setSize([720, 905]);
 
+                // 【安定版の処理】リサイズ時の幅・高さ制御
                 const onResize = node.onResize;
                 node.onResize = function (size) {
-                    // 最小サイズを保証
                     if (size[0] < 720) size[0] = 720;
-                    if (size[1] < 880) size[1] = 880;
+                    if (size[1] < 905) size[1] = 905;
                     
                     if (root) {
                         root.style.width = (size[0] - 20) + "px";
-                        root.style.height = (size[1] - 60) + "px"; 
+                        root.style.height = (size[1] - 85) + "px"; 
                     }
                     
                     if (onResize) onResize.apply(this, arguments);
@@ -1388,6 +1543,9 @@ app.registerExtension({
                     for (let i = 1; i <= 4; i++) {
                         if (wMap[`shot${i}_enabled`]) shotEnabledState[i] = !!wMap[`shot${i}_enabled`].value;
                     }
+                    for (let i = 1; i <= 10; i++) {
+                        if (wMap[`c${i}_enabled`]) clipEnabledState[i] = !!wMap[`c${i}_enabled`].value;
+                    }
                     try {
                         if (wMap["timeline_data"] && wMap["timeline_data"].value) {
                             state = JSON.parse(wMap["timeline_data"].value);
@@ -1396,8 +1554,9 @@ app.registerExtension({
                     renderTabContent();
                     renderFixedMediaLanes();
                     
-                    if (node.size[0] < 720 || node.size[1] < 880) {
-                        node.setSize([Math.max(720, node.size[0]), Math.max(880, node.size[1])]);
+                    // 【安定版の処理】ロード後のサイズ修復
+                    if (node.size[0] < 720 || node.size[1] < 905) {
+                        node.setSize([Math.max(720, node.size[0]), Math.max(905, node.size[1])]);
                     }
                     if (root) {
                         root.style.width = (node.size[0] - 20) + "px";
