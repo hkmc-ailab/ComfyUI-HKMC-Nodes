@@ -226,6 +226,7 @@ function installStudioStyles() {
             gap: 8px;
             transition: background 0.15s, transform 0.05s;
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            flex-shrink: 0;
         }
         .h3-btn-gen-prompt:hover { background: #0088e6; }
         .h3-btn-gen-prompt:active { transform: scale(0.99); }
@@ -242,6 +243,7 @@ function installStudioStyles() {
             font-size: 11px;
             cursor: pointer;
             user-select: none;
+            flex-shrink: 0;
         }
         .h3-use-prompt-banner input { width: 15px; height: 15px; cursor: pointer; }
         .h3-use-prompt-text { font-weight: bold; color: #ffffff; }
@@ -261,6 +263,7 @@ function installStudioStyles() {
             box-sizing: border-box;
             resize: vertical;
             outline: none;
+            flex-shrink: 0;
         }
         .h3-prompt-textarea:focus { border-color: #6e7681; }
 
@@ -486,11 +489,27 @@ function installStudioStyles() {
         }
         .h3-slot-del-btn:hover { background: #d32f2f; }
         
+        .h3-clip-results-container {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            flex: 1 1 auto;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+        .h3-clip-results-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        .h3-clip-results-container::-webkit-scrollbar-thumb {
+            background: #383838;
+            border-radius: 3px;
+        }
         .h3-clip-result-title {
             font-size: 11px;
             font-weight: bold;
             color: #ffffff;
             margin-top: 8px;
+            flex-shrink: 0;
         }
         .h3-clip-result-text {
             width: 100%;
@@ -504,6 +523,7 @@ function installStudioStyles() {
             box-sizing: border-box;
             white-space: pre-wrap;
             word-break: break-all;
+            flex-shrink: 0;
         }
     `;
     document.head.appendChild(style);
@@ -523,7 +543,6 @@ app.registerExtension({
                 node.widgets.forEach(w => {
                     wMap[w.name] = w;
                     w.draw = function () {};
-                    // 【安定版の処理】LiteGraphのマージンを相殺する
                     w.computeSize = () => [0, -4];
                     if (w.inputEl) w.inputEl.style.display = "none";
                 });
@@ -568,16 +587,12 @@ app.registerExtension({
                 const root = document.createElement("div");
                 root.className = "h3-studio-container";
 
-                // GUI全体を少し上へ移動
-                const GUI_Y_OFFSET = -14;
-                root.style.transform = `translateY(${GUI_Y_OFFSET}px)`;
-
                 const tabBar = document.createElement("div");
                 tabBar.className = "h3-tab-bar";
 
                 const tabs = [
                     { id: "cast", label: "キャラクター設定" },
-                    { id: "timeline", label: "⏱タイムライン" },
+                    { id: "timeline", label: "タイムライン" },
                     { id: "scene", label: "演出＆メディア" },
                     { id: "clip", label: "クリップ" },
                     { id: "llm", label: "LLM設定" },
@@ -600,6 +615,11 @@ app.registerExtension({
                             fixedMediaArea.style.display = "flex";
                         }
                         renderTabContent();
+                        
+                        if (node.size[0] < 720) {
+                            node.size[0] = 720;
+                            node.setDirtyCanvas(true, true);
+                        }
                     };
                     tabButtons[t.id] = btn;
                     tabBar.appendChild(btn);
@@ -882,7 +902,7 @@ app.registerExtension({
 
                     const syncToWidget = () => {
                         const smVal = parseInt(inSm.value) || 0;
-                        const ssVal = String(parseInt(inSm.value) || 0).padStart(2, "0");
+                        const ssVal = String(parseInt(inSs.value) || 0).padStart(2, "0");
                         const smsVal = parseInt(inSms.value) || 0;
 
                         const emVal = parseInt(inEm.value) || 0;
@@ -1114,12 +1134,12 @@ app.registerExtension({
                             bindInput("ambient_sound", "環境音 (Foley)", false, "足音、風の音、ドアの開閉音、雨音などの環境音・効果音を入力"),
                             bindInput("bgm", "BGM (劇伴音楽)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
                         );
-
+                        
                     } else if (activeTab === "clip") {
                         const toggleBar = document.createElement("div");
                         toggleBar.className = "h3-top-toggle-bar";
                         toggleBar.style.flexWrap = "wrap";
-                        toggleBar.style.marginBottom = "8px";
+                        toggleBar.style.marginBottom = "10px";
 
                         const clipCards = {};
 
@@ -1194,7 +1214,28 @@ app.registerExtension({
                             };
                             contLabel.append(contChk, document.createTextNode("前回の動画の続きを生成する"));
 
-                            titleBar.append(title, contLabel);
+                            const linkWidget = wMap[`c${i}_link_next`];
+                            const linkLabel = document.createElement("label");
+                            linkLabel.style.fontSize = "11px";
+                            linkLabel.style.color = "#dbe0e6";
+                            linkLabel.style.display = "flex";
+                            linkLabel.style.alignItems = "center";
+                            linkLabel.style.gap = "4px";
+                            linkLabel.style.cursor = "pointer";
+                            linkLabel.style.marginLeft = "12px";
+
+                            const linkChk = document.createElement("input");
+                            linkChk.type = "checkbox";
+                            linkChk.checked = linkWidget ? !!linkWidget.value : false;
+                            linkChk.onchange = () => {
+                                if (linkWidget) {
+                                    linkWidget.value = linkChk.checked;
+                                    if (linkWidget.callback) linkWidget.callback(linkChk.checked);
+                                }
+                            };
+                            linkLabel.append(linkChk, document.createTextNode("今回の動画を次に繋げる"));
+
+                            titleBar.append(title, contLabel, linkLabel);
 
                             const promptRow = bindInput(`c${i}_prompt`, null, true, "ここに日本語でプロンプトの指示を記入してください");
 
@@ -1263,9 +1304,7 @@ app.registerExtension({
                         banner.append(chk, txtGroup);
 
                         const clipResContainer = document.createElement("div");
-                        clipResContainer.style.display = "flex";
-                        clipResContainer.style.flexDirection = "column";
-                        clipResContainer.style.gap = "4px";
+                        clipResContainer.className = "h3-clip-results-container";
 
                         const updateClipResultsUI = (clipData) => {
                             clipResContainer.replaceChildren();
@@ -1505,7 +1544,6 @@ app.registerExtension({
                     mediaBody.append(imgBlock, kfBlock, vidBlock, audBlock);
                 };
 
-                // 【安定版の処理】DOMの追加 (余白などの計算を標準のLiteGraphに任せる)
                 if (node.addDOMWidget) {
                     node.addDOMWidget("studio_console_ui", "custom", root, {
                         serialize: false,
@@ -1514,10 +1552,8 @@ app.registerExtension({
                     });
                 }
 
-                // 【安定版の処理】ノードの初期サイズ
                 node.setSize([720, 905]);
 
-                // 【安定版の処理】リサイズ時の幅・高さ制御
                 const onResize = node.onResize;
                 node.onResize = function (size) {
                     if (size[0] < 720) size[0] = 720;
@@ -1554,13 +1590,12 @@ app.registerExtension({
                     renderTabContent();
                     renderFixedMediaLanes();
                     
-                    // 【安定版の処理】ロード後のサイズ修復
                     if (node.size[0] < 720 || node.size[1] < 905) {
                         node.setSize([Math.max(720, node.size[0]), Math.max(905, node.size[1])]);
                     }
                     if (root) {
                         root.style.width = (node.size[0] - 20) + "px";
-                        root.style.height = (node.size[1] - 60) + "px";
+                        root.style.height = (node.size[1] - 85) + "px";
                     }
                 };
             };

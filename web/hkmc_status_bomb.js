@@ -1,6 +1,5 @@
 import { app } from "../../scripts/app.js";
 
-// 全グラフ（メイン＋サブグラフ全部）を収集
 function collectAllGraphs() {
     const root = app.graph;
     const graphs = new Set();
@@ -59,7 +58,6 @@ function findNodeGlobally(nodeId, allGraphs) {
     return null;
 }
 
-// Node 5 などのグループノードからツマミ値を確実に取得
 function extractValuesFromNode5(node) {
     if (!node || !node.widgets) return null;
 
@@ -92,7 +90,6 @@ function extractValuesFromNode5(node) {
     return null;
 }
 
-// 親スイッチのシグナルを解決
 function getMasterSignal(allGraphs) {
     const rootNodes = app.graph?._nodes || [];
     for (const n of rootNodes) {
@@ -125,7 +122,6 @@ function getMasterSignal(allGraphs) {
     return null;
 }
 
-// メイン爆破処理
 function triggerBombExecution() {
     try {
         const rootGraph = app.graph;
@@ -193,11 +189,9 @@ function triggerBombExecution() {
             app.canvas.setDirty(true, true);
         }
     } catch (error) {
-        // 例外を完全に握り潰し、監視ループのフリーズを防ぐ
     }
 }
 
-// 幽霊出力ピン（target_out）が残っていたら強制削除して検証エラーを防止
 function cleanupGhostOutputs(node) {
     try {
         if (node.outputs && node.outputs.length > 0) {
@@ -209,7 +203,6 @@ function cleanupGhostOutputs(node) {
     } catch (e) {}
 }
 
-// 子ノード（入力 target_XX の増減）
 function manageChildTargetInputs(node) {
     try {
         if (!node.inputs) return;
@@ -247,7 +240,6 @@ function manageChildTargetInputs(node) {
     } catch (e) {}
 }
 
-// 親ノード（出力 signal_out_XX の増減）
 function manageMasterOutputSlots(node) {
     try {
         if (!node.outputs) return;
@@ -299,7 +291,7 @@ function setupNodeHooks(node) {
 
     if (isChild && !node._bomb_hooked) {
         node._bomb_hooked = true;
-        cleanupGhostOutputs(node); // 検証エラーの元となる幽霊出力を消去
+        cleanupGhostOutputs(node); 
         const origOnConnectionsChange = node.onConnectionsChange;
         node.onConnectionsChange = function (type, index, isConnected) {
             let res;
@@ -311,7 +303,6 @@ function setupNodeHooks(node) {
         manageChildTargetInputs(node);
     }
 
-    // 全ノードのウィジェット操作監視 (エラーで止まらないようにtry-catch強化)
     if (node.widgets) {
         node.widgets.forEach(w => {
             if (!w._bomb_cb_hooked) {
@@ -349,7 +340,6 @@ app.registerExtension({
         });
         setTimeout(triggerBombExecution, 250);
         
-        // 0.3秒間隔でグラフを監視し、リアルタイムに変更を反映する絶対停止しない安全装置
         if (!window._hkmc_bomb_interval) {
             window._hkmc_bomb_interval = setInterval(triggerBombExecution, 300);
         }
