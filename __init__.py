@@ -19,7 +19,6 @@ from .h3_prompt_director_gui import (
 )
 from .save_audio_wav import SaveAudioWav
 from .h3_pipe import ToH3Pipe, FromH3Pipe, FromH3MediaPipe
-from .hkmc_group_switch import HKMCGroupSwitch
 from .hkmc_clip_prompt_dispatcher import HKMCClipPromptDispatcher
 from .hkmc_status_bomb import HKMCMasterBombSwitch, HKMCChildBombGate
 
@@ -38,7 +37,6 @@ NODE_CLASS_MAPPINGS = {
     "ToH3Pipe": ToH3Pipe,
     "FromH3Pipe": FromH3Pipe,
     "FromH3MediaPipe": FromH3MediaPipe,
-    "HKMCGroupSwitch": HKMCGroupSwitch,
     "HKMCClipPromptDispatcher": HKMCClipPromptDispatcher,
     "HKMCMasterBombSwitch": HKMCMasterBombSwitch,
     "HKMCChildBombGate": HKMCChildBombGate,
@@ -59,7 +57,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ToH3Pipe": "To H3 Pipe",
     "FromH3Pipe": "From H3 Pipe",
     "FromH3MediaPipe": "From H3 Media Pipe",
-    "HKMCGroupSwitch": "HKMC Group Switch",
     "HKMCClipPromptDispatcher": "HKMC Clip Prompt Dispatcher",
     "HKMCMasterBombSwitch": "HKMC Master Switch (親)",
     "HKMCChildBombGate": "HKMC Child Bomb (子)",

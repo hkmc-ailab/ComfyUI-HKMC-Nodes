@@ -232,10 +232,10 @@ def translate_clip_texts(clips_dict, kwargs):
     if not clips_dict:
         return {}
         
-    prompt_text = "Translate the following Japanese video generation prompts into English precisely. Output ONLY the English translations separated by '|||'. Maintain the exact order and do not include any extra notes.\n\n"
+    prompt_text = "Translate the following Japanese video generation prompts into English precisely. Output ONLY the English translations separated by '|||' (three pipe characters). Maintain the exact order and do not include any extra notes or headings.\n\n"
     keys = list(clips_dict.keys())
     for k in keys:
-        prompt_text += f"Text:\n{clips_dict[k]}\n|||\n"
+        prompt_text += f"{clips_dict[k]}\n|||\n"
         
     provider = kwargs.get("llm_provider", "Ollama (Local)")
     api_key = kwargs.get("llm_api_key", "")
@@ -249,10 +249,14 @@ def translate_clip_texts(clips_dict, kwargs):
         
     translations = {}
     if result_text:
-        parts = [p.strip() for p in result_text.split("|||") if p.strip()]
+        # || または ||| または |||| などLLMのブレに対応して分割
+        parts = [p.strip() for p in re.split(r'\|{2,}', result_text) if p.strip()]
         for i, k in enumerate(keys):
             if i < len(parts):
-                translations[k] = parts[i]
+                t = parts[i]
+                # LLMが勝手に付けがちな「Clip 1:」や「Text:」などを自動削除
+                t = re.sub(r'^(Text|Clip\s*\d+|Translation):\s*', '', t, flags=re.IGNORECASE).strip()
+                translations[k] = t
             else:
                 translations[k] = clips_dict[k]
                 
@@ -500,8 +504,16 @@ async def handle_generate_prompt(request):
             txt = clip_prompts_out.get(i, "").strip()
             if txt:
                 do_continue = data.get(f"c{i}_continue", True)
+                link_next = data.get(f"c{i}_link_next", False)
+                
+                # 「前回の動画の続きを生成する」の処理（文頭に追加）
                 if do_continue:
                     txt = "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, camera trajectory, facial state, lighting, environment, object state, voice, ambience, and timing. Connected reference images are optional; use them only to preserve stable subject identity and appearance beneath that incoming state. " + txt
+                
+                # 「今回の動画を次に繋げる」の処理（文末に追加）
+                if link_next:
+                    txt += " Continue the exact motion and sound already in progress, then develop the next action naturally. [DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
+                    
                 final_clip_prompts[str(i)] = txt
                 
         return web.json_response({
@@ -592,9 +604,9 @@ class H3PromptDirectorGUI:
         for i in range(1, 11):
             inputs["required"][f"c{i}_enabled"] = ("BOOLEAN", {"default": False})
             inputs["required"][f"c{i}_continue"] = ("BOOLEAN", {"default": True})
+            inputs["required"][f"c{i}_link_next"] = ("BOOLEAN", {"default": False})
             inputs["required"][f"c{i}_prompt"] = ("STRING", {"multiline": True, "default": ""})
 
-        # 翻訳後のクリップ結果を保存する隠しウィジェット
         inputs["required"]["generated_clip_prompts"] = ("STRING", {"default": "{}"})
 
         return inputs
@@ -608,7 +620,6 @@ class H3PromptDirectorGUI:
         use_custom = kwargs.get("use_custom_prompt", False)
         custom_txt = kwargs.get("custom_prompt", "").strip()
 
-        # --- ベースプロンプトの処理 ---
         if use_custom and custom_txt:
             prompt_result = custom_txt
             if kwargs.get("llm_provider") == "Ollama (Local)":
@@ -621,10 +632,8 @@ class H3PromptDirectorGUI:
             except Exception as e:
                 prompt_result = f"Error during prompt generation: {e}"
 
-        # --- クリップ用プロンプトの処理 (GUIで保存されたJSONを読み込む) ---
         clip_prompt_json = kwargs.get("generated_clip_prompts", "{}")
         
-        # もし未生成（空）の場合は、翻訳せずに日本語のままフォールバックとして出力する
         try:
             parsed = json.loads(clip_prompt_json)
         except:
@@ -637,10 +646,11 @@ class H3PromptDirectorGUI:
                     if txt:
                         if kwargs.get(f"c{i}_continue", True):
                             txt = "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, camera trajectory, facial state, lighting, environment, object state, voice, ambience, and timing. Connected reference images are optional; use them only to preserve stable subject identity and appearance beneath that incoming state. " + txt
+                        if kwargs.get(f"c{i}_link_next", False):
+                            txt += " Continue the exact motion and sound already in progress, then develop the next action naturally. [DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
                         parsed[str(i)] = txt
             clip_prompt_json = json.dumps(parsed, ensure_ascii=False)
 
-        # --- メディアバンドルの処理 ---
         images, keyframes, videos, audios = {}, {}, {}, {}
         try:
             data = json.loads(kwargs.get("timeline_data", '{"items":[]}'))
