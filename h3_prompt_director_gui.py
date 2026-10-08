@@ -185,6 +185,79 @@ def unload_ollama_vram(model_name):
     except Exception:
         pass
 
+def contains_japanese(text):
+    return bool(re.search(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', text))
+
+def call_llm(sys_inst, provider, api_key, model_name, temp=0.7):
+    if provider == "Gemini (Cloud)":
+        active_key = api_key if api_key and api_key.strip() else os.getenv("GEMINI_API_KEY")
+        if not active_key:
+            raise ValueError("Gemini API Keyが設定されていません。")
+        genai.configure(api_key=active_key)
+        model = genai.GenerativeModel(model_name or "gemini-2.5-flash")
+        return model.generate_content(sys_inst).text.strip()
+
+    elif provider == "ChatGPT (OpenAI)":
+        active_key = api_key if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY")
+        if not active_key:
+            raise ValueError("OpenAI API Keyが設定されていません。")
+        client = OpenAI(api_key=active_key)
+        response = client.chat.completions.create(
+            model=model_name or "gpt-4o",
+            messages=[{
+                "role": "system",
+                "content": "You are an expert translator and prompt engineer."
+            }, {"role": "user", "content": sys_inst}],
+            temperature=temp,
+        )
+        return response.choices[0].message.content.strip()
+
+    elif provider == "Ollama (Local)":
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": model_name or "qwen2.5:7b-instruct-q5_K_M",
+            "prompt": sys_inst,
+            "stream": False,
+            "options": {"temperature": temp},
+        }
+        res = requests.post(url, json=payload, timeout=300)
+        res.raise_for_status()
+        prompt_result = res.json().get("response", "").strip()
+        unload_ollama_vram(model_name or "qwen2.5:7b-instruct-q5_K_M")
+        return prompt_result
+    else:
+        raise ValueError(f"未知のLLMプロバイダー: {provider}")
+
+def translate_clip_texts(clips_dict, kwargs):
+    if not clips_dict:
+        return {}
+        
+    prompt_text = "Translate the following Japanese video generation prompts into English precisely. Output ONLY the English translations separated by '|||'. Maintain the exact order and do not include any extra notes.\n\n"
+    keys = list(clips_dict.keys())
+    for k in keys:
+        prompt_text += f"Text:\n{clips_dict[k]}\n|||\n"
+        
+    provider = kwargs.get("llm_provider", "Ollama (Local)")
+    api_key = kwargs.get("llm_api_key", "")
+    model_name = kwargs.get("llm_model", "").strip()
+    
+    try:
+        result_text = call_llm(prompt_text, provider, api_key, model_name, temp=0.3)
+    except Exception as e:
+        print(f"Translation Error: {e}")
+        return clips_dict
+        
+    translations = {}
+    if result_text:
+        parts = [p.strip() for p in result_text.split("|||") if p.strip()]
+        for i, k in enumerate(keys):
+            if i < len(parts):
+                translations[k] = parts[i]
+            else:
+                translations[k] = clips_dict[k]
+                
+    return translations
+
 def build_and_generate_prompt(kwargs):
     def process_wildcards(text):
         char_dir = os.path.join(os.path.dirname(__file__), "characters")
@@ -303,11 +376,11 @@ def build_and_generate_prompt(kwargs):
 
     creative_mode = kwargs.get("creative_mode", "オフ")
     if creative_mode == "リッチ (小物・情景追加)":
-        creative_instruction = "- Act as a master anime scene director. ACTIVELY ENHANCE THE SCENE by adding fitting thematic props, background furniture, atmospheric lighting, and contextual environment elements to the summary."
+        creative_instruction = "  Act as a master anime scene director. ACTIVELY ENHANCE THE SCENE by adding fitting thematic props, background elements, lighting, and environmental context to the summary based on the situation."
     elif creative_mode == "控えめ (光・空気感)":
-        creative_instruction = "- Subtly enhance the atmosphere by adding cinematic lighting, time of day, and environmental ambiance (e.g., warm golden hour, gentle rim lighting) to the summary."
+        creative_instruction = "  Subtly enhance the atmosphere by adding cinematic lighting, time of day, and environmental ambiance (e.g., warm golden hour, gentle rim lighting) to the summary based on the situation."
     else:
-        creative_instruction = "- Strictly translate the situation faithfully without inventing unmentioned objects or extra atmospheric effects."
+        creative_instruction = "  Translate the situation faithfully and concisely into English without inventing unmentioned locations, objects, or extra context."
 
     raw_rules = load_system_rules()
     sys_inst = raw_rules.format(
@@ -325,43 +398,7 @@ def build_and_generate_prompt(kwargs):
     model_name = kwargs.get("llm_model", "").strip()
     temp = 0.7 if creative_mode != "オフ" else 0.3
 
-    if provider == "Gemini (Cloud)":
-        active_key = api_key if api_key and api_key.strip() else os.getenv("GEMINI_API_KEY")
-        if not active_key:
-            raise ValueError("Gemini API Keyが設定されていません。")
-        genai.configure(api_key=active_key)
-        model = genai.GenerativeModel(model_name or "gemini-2.5-flash")
-        prompt_result = model.generate_content(sys_inst).text.strip()
-
-    elif provider == "ChatGPT (OpenAI)":
-        active_key = api_key if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY")
-        if not active_key:
-            raise ValueError("OpenAI API Keyが設定されていません。")
-        client = OpenAI(api_key=active_key)
-        response = client.chat.completions.create(
-            model=model_name or "gpt-4o",
-            messages=[{
-                "role": "system",
-                "content": "You are an expert prompt engineer specialized in the MiniMax H3 video generation model.",
-            }, {"role": "user", "content": sys_inst}],
-            temperature=temp,
-        )
-        prompt_result = response.choices[0].message.content.strip()
-
-    elif provider == "Ollama (Local)":
-        url = "http://localhost:11434/api/generate"
-        payload = {
-            "model": model_name or "qwen2.5:7b-instruct-q5_K_M",
-            "prompt": sys_inst,
-            "stream": False,
-            "options": {"temperature": temp},
-        }
-        res = requests.post(url, json=payload, timeout=300)
-        res.raise_for_status()
-        prompt_result = res.json().get("response", "").strip()
-        unload_ollama_vram(model_name or "qwen2.5:7b-instruct-q5_K_M")
-    else:
-        raise ValueError(f"未知のLLMプロバイダー: {provider}")
+    prompt_result = call_llm(sys_inst, provider, api_key, model_name, temp)
 
     def fix_bracketed_subject(m):
         subj_num = m.group(1)
@@ -381,8 +418,6 @@ def build_and_generate_prompt(kwargs):
     prompt_result = re.sub(r"-\s*Subtly enhance the atmosphere[\s\S]*?(?=\n\s*retention_analysis:)", "", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"\[Subject\s*\d+:\s*CharacterName\]\s*", "", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"\[English translation[^\]]*\]\s*", "", prompt_result, flags=re.IGNORECASE)
-    prompt_result = re.sub(r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$", "", prompt_result)
-    prompt_result = re.sub(r"(?im)^Reference sheets for\s+[\w\s]+\s+include\s+<Picture\s*\d+>.*$", "", prompt_result)
     prompt_result = re.sub(r"(?im)^Vocal reference for\s+[\w\s]+\s+is\s+<Audio\s*\d+>.*$", "", prompt_result)
     prompt_result = re.sub(r"Action/Camera:\s*", "", prompt_result)
 
@@ -433,14 +468,50 @@ def build_and_generate_prompt(kwargs):
 
     return prompt_result
 
+# --- API ルーティング (ボタン押下時に翻訳とベース生成を一括実行) ---
 @PromptServer.instance.routes.post("/h3/generate_prompt")
 async def handle_generate_prompt(request):
     try:
         data = await request.json()
-        result = build_and_generate_prompt(data)
-        return web.json_response({"success": True, "prompt": result})
+        
+        # 1. ベースプロンプトの生成
+        prompt_result = build_and_generate_prompt(data)
+        
+        # 2. クリップ用プロンプトの翻訳と構築
+        clip_prompts_out = {}
+        clips_to_translate = {}
+        
+        for i in range(1, 11):
+            if data.get(f"c{i}_enabled", False):
+                txt = data.get(f"c{i}_prompt", "").strip()
+                if txt:
+                    if contains_japanese(txt):
+                        clips_to_translate[i] = txt
+                    else:
+                        clip_prompts_out[i] = txt
+                        
+        if clips_to_translate:
+            translated = translate_clip_texts(clips_to_translate, data)
+            for k, v in translated.items():
+                clip_prompts_out[k] = v
+                
+        final_clip_prompts = {}
+        for i in range(1, 11):
+            txt = clip_prompts_out.get(i, "").strip()
+            if txt:
+                do_continue = data.get(f"c{i}_continue", True)
+                if do_continue:
+                    txt = "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, camera trajectory, facial state, lighting, environment, object state, voice, ambience, and timing. Connected reference images are optional; use them only to preserve stable subject identity and appearance beneath that incoming state. " + txt
+                final_clip_prompts[str(i)] = txt
+                
+        return web.json_response({
+            "success": True, 
+            "prompt": prompt_result,
+            "clip_prompts": final_clip_prompts
+        })
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
+
 
 class H3PromptDirectorGUI:
     @classmethod
@@ -458,7 +529,7 @@ class H3PromptDirectorGUI:
         char_list = cls.get_character_files()
         audio_list = ["None", "<Audio 0>", "<Audio 1>", "<Audio 2>"]
 
-        return {
+        inputs = {
             "required": {
                 "use_custom_prompt": ("BOOLEAN", {"default": False}),
                 "custom_prompt": ("STRING", {"multiline": True, "default": ""}),
@@ -517,9 +588,19 @@ class H3PromptDirectorGUI:
                 "shot4_dialogue": ("STRING", {"multiline": True, "default": ""}),
             }
         }
+        
+        for i in range(1, 11):
+            inputs["required"][f"c{i}_enabled"] = ("BOOLEAN", {"default": False})
+            inputs["required"][f"c{i}_continue"] = ("BOOLEAN", {"default": True})
+            inputs["required"][f"c{i}_prompt"] = ("STRING", {"multiline": True, "default": ""})
 
-    RETURN_TYPES = ("STRING", "H3_MEDIA_BUNDLE")
-    RETURN_NAMES = ("prompt", "media_bundle")
+        # 翻訳後のクリップ結果を保存する隠しウィジェット
+        inputs["required"]["generated_clip_prompts"] = ("STRING", {"default": "{}"})
+
+        return inputs
+
+    RETURN_TYPES = ("STRING", "STRING", "H3_MEDIA_BUNDLE")
+    RETURN_NAMES = ("prompt", "clip_prompt", "media_bundle")
     FUNCTION = "process_studio"
     CATEGORY = "MiniMax_H3"
 
@@ -527,6 +608,7 @@ class H3PromptDirectorGUI:
         use_custom = kwargs.get("use_custom_prompt", False)
         custom_txt = kwargs.get("custom_prompt", "").strip()
 
+        # --- ベースプロンプトの処理 ---
         if use_custom and custom_txt:
             prompt_result = custom_txt
             if kwargs.get("llm_provider") == "Ollama (Local)":
@@ -539,6 +621,26 @@ class H3PromptDirectorGUI:
             except Exception as e:
                 prompt_result = f"Error during prompt generation: {e}"
 
+        # --- クリップ用プロンプトの処理 (GUIで保存されたJSONを読み込む) ---
+        clip_prompt_json = kwargs.get("generated_clip_prompts", "{}")
+        
+        # もし未生成（空）の場合は、翻訳せずに日本語のままフォールバックとして出力する
+        try:
+            parsed = json.loads(clip_prompt_json)
+        except:
+            parsed = {}
+            
+        if not parsed:
+            for i in range(1, 11):
+                if kwargs.get(f"c{i}_enabled", False):
+                    txt = kwargs.get(f"c{i}_prompt", "").strip()
+                    if txt:
+                        if kwargs.get(f"c{i}_continue", True):
+                            txt = "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, camera trajectory, facial state, lighting, environment, object state, voice, ambience, and timing. Connected reference images are optional; use them only to preserve stable subject identity and appearance beneath that incoming state. " + txt
+                        parsed[str(i)] = txt
+            clip_prompt_json = json.dumps(parsed, ensure_ascii=False)
+
+        # --- メディアバンドルの処理 ---
         images, keyframes, videos, audios = {}, {}, {}, {}
         try:
             data = json.loads(kwargs.get("timeline_data", '{"items":[]}'))
@@ -575,7 +677,8 @@ class H3PromptDirectorGUI:
             "audios": audios,
         }
 
-        return (prompt_result, media_bundle)
+        return (prompt_result, clip_prompt_json, media_bundle)
+
 
 class H3MediaDispatcher:
     @classmethod
@@ -595,14 +698,14 @@ class H3MediaDispatcher:
         }
 
     RETURN_TYPES = (
-        "H3_MEDIA_PIPE",  # 追記: 1本にまとめたパイプ線
+        "H3_MEDIA_PIPE",
         "IMAGE", "IMAGE",
         "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
         "IMAGE", "IMAGE",
         "AUDIO", "AUDIO", "AUDIO",
     )
     RETURN_NAMES = (
-        "media_pipe",     # 追記
+        "media_pipe",
         "first_frame", "last_frame",
         "ref_image_0", "ref_image_1", "ref_image_2", "ref_image_3", "ref_image_4", "ref_image_5", "ref_image_6", "ref_image_7", "ref_image_8",
         "ref_video_0", "ref_video_1",
