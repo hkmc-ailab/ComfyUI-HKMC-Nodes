@@ -24,7 +24,6 @@ class HKMCMasterBombSwitch:
             },
         }
 
-    # バックエンドの検証エラー(tuple index out of range)を防ぐため、最大64ピン分の出力を事前定義
     RETURN_TYPES = tuple(["HKMC_BOMB_SIG"] * 64)
     RETURN_NAMES = tuple([f"signal_out_{i+1}" if i > 0 else "signal_out" for i in range(64)])
     FUNCTION = "execute"
@@ -37,7 +36,6 @@ class HKMCMasterBombSwitch:
 
     def execute(self, enabled, value, unique_id=None, **kwargs):
         signal = int(value) if enabled else 0
-        # 定義した64ピンすべてに安全に同じシグナルを流す
         return tuple([signal] * 64)
 
 
@@ -56,11 +54,10 @@ class HKMCChildBombGate:
             },
         }
 
-    # 子ノードは出力を持たないため、完全にゼロとして定義
     RETURN_TYPES = ()
     FUNCTION = "execute"
     CATEGORY = "HKMC/bomb"
-    OUTPUT_NODE = False  # Play(実行)ボタンを削除
+    OUTPUT_NODE = False  
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
@@ -70,7 +67,6 @@ class HKMCChildBombGate:
         return True
 
     def execute(self, signal, clip_index, action, invert=False, unique_id=None, **kwargs):
-        # 処理はJS側で行うため、Python側は何もしない
         return ()
 
 

@@ -11,7 +11,7 @@ class ToH3Pipe:
                 "sigmas": ("SIGMAS",),
                 "width": ("INT", {"default": 1344, "min": 64, "max": 4096, "step": 32}),
                 "height": ("INT", {"default": 768, "min": 64, "max": 4096, "step": 32}),
-                "length": ("INT", {"default": 124, "min": 5, "max": 4096, "step": 17}), # 追加
+                "length": ("INT", {"default": 124, "min": 5, "max": 4096, "step": 17}),
             }
         }
 
@@ -92,6 +92,7 @@ class FromH3MediaPipe:
         "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
         "IMAGE", "IMAGE",
         "AUDIO", "AUDIO", "AUDIO",
+        "AUDIO", "AUDIO", # 追加: drive_audio, final_audio
     )
     RETURN_NAMES = (
         "media_pipe",
@@ -99,6 +100,7 @@ class FromH3MediaPipe:
         "ref_image_0", "ref_image_1", "ref_image_2", "ref_image_3", "ref_image_4", "ref_image_5", "ref_image_6", "ref_image_7", "ref_image_8",
         "ref_video_0", "ref_video_1",
         "ref_audio_0", "ref_audio_1", "ref_audio_2",
+        "drive_audio", "final_audio", # 追加
     )
     FUNCTION = "unpack_media_pipe"
     CATEGORY = "HKMC/H3_Pipe"

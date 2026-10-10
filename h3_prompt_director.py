@@ -15,6 +15,13 @@ import scipy.io.wavfile as wavfile
 
 # --- ヘルパー関数群 ---
 
+def load_system_rules():
+    rule_path = os.path.join(os.path.dirname(__file__), "rules.txt")
+    if os.path.exists(rule_path):
+        with open(rule_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return ""
+
 def load_image_raw_tensor(filename):
     input_dir = folder_paths.get_input_directory()
     image_path = os.path.join(input_dir, filename)
@@ -162,10 +169,6 @@ def process_video_tensor(tensor, target_w, target_h, mode="crop", crop_pos="cent
     return resized_frames
 
 
-# ==========================================
-# ノード 1: H3PromptDirector
-# ==========================================
-
 class H3PromptDirector:
     @classmethod
     def INPUT_TYPES(cls):
@@ -276,78 +279,18 @@ class H3PromptDirector:
 
         char_description = self.process_wildcards(キャラクターの特徴)
 
-        system_instruction = f"""
-You are an expert prompt engineer specialized in the MiniMax H3 video generation model (REF2VA mode).
-Convert the following Japanese user instructions into a fluent, high-precision, authentic 2D anime-style English structured prompt.
-
-[STRICT RULES]
-1. Output MUST be 100% English. NO Chinese characters anywhere.
-2. Output ONLY the 6 section headers below in raw plain text (no markdown blocks).
-3. [MULTIPLE CHARACTERS & FIXATION - CRITICAL]:
-   - You MUST deeply analyze the "Character Concept" input and translate ALL specific details accurately. DO NOT summarize, shorten, or invent details.
-   - Format each character under their respective tag inside `subject_definitions`, e.g., `[Subject 1: Name]`.
-   - At the end of EACH character's block, summarize their specific reference sheets.
-   - IF Franc is present: Her mechanical prosthetic arms MUST be COMPLETELY CONCEALED beneath long loose jacket sleeves. ONLY her metallic hands/fingers extend from the cuffs.
-4. [TIMELINE & LIP-SYNC STRICT RULES - ABSOLUTE ZERO TOLERANCE]:
-   - NEVER drop, omit, summarize, or rephrase dialogue into actions (e.g., NEVER replace a line with "asking a question" or "says something").
-   - If dialogue lines exist in "Movement & Timing", preserve them verbatim inside `<d>[Japanese] ... </d>`.
-- For ANY speaking character, you MUST use this structure:
-     "[Character] (position) turns to face [Partner] (position), visibly opening and moving her/his mouth in natural anime lip-sync articulation while speaking with <Audio X>: S1: <d>[Japanese] セリフ </d>"
-5. [DETAILED DESCRIPTION CONSTRAINTS]:
-   - `detailed_description` MUST focus strictly on movement, camera framing, facial expressions, and lip-sync articulation. Never re-describe clothing.
-   - [ACTIONS & EMOTIONS RETENTION - CRITICAL]: You MUST accurately preserve ALL physical gestures (e.g., raising an arm/hand, pointing, tilting head) and facial emotions (e.g., smiling, grinning, relaxed, surprised) specified in "Movement & Timing". NEVER omit or summarize away character gestures and smiles.
-6. [PROHIBITIONS]:
-   - Under `retention_analysis`, always enforce: "Strictly 2D flat cel-shaded anime style. No 3D CGI rendering, no glossy plastic skin."
-
-[AUDIO REFERENCE RULES]:
-- If <Audio 0>, <Audio 1>, or <Audio 2> are mentioned, explicitly specify them in `subject_definitions` and `detailed_description` as the character's vocal reference.
-
-[FEW-SHOT EXAMPLE]
-User Input:
-- Character Concept: 
-  [Subject 1: CharacterA] appearance details... Reference sheets include <Picture 0>.
-  [Subject 2: CharacterB] appearance details... Reference sheets include <Picture 1>.
-- Situation: CharacterA and CharacterB in the room.
-- Dialogue: N/A
-- Movement & Timing: 
-  [Shot 1 | 0:00-0:03.0] CharacterA speaks. S1: <d>[Japanese] 入力されたセリフA </d>
-  [Shot 2 | 0:03.0-0:06.0] CharacterB replies. S2: <d>[Japanese] 入力されたセリフB </d>
-Output:
-subject_definitions:
-[Subject 1: CharacterA]
-(Appearance of CharacterA)
-Reference sheets for CharacterA include <Picture 0>.
-
-[Subject 2: CharacterB]
-(Appearance of CharacterB)
-Reference sheets for CharacterB include <Picture 1>.
-
-summary:
-CharacterA (left) and CharacterB (right) in the room.
-retention_analysis:
-Strictly 2D flat cel-shaded anime style. No 3D CGI rendering. Maintain positions: CharacterA on left, CharacterB on right.
-detailed_description:
-[Shot 1 | 0:00-0:03.0]
-CharacterA (left) turns to face CharacterB (right), visibly opening and moving mouth in natural anime lip-sync articulation while speaking: S1: <d>[Japanese] 入力されたセリフA </d>
-
-[Shot 2 | 0:03.0-0:06.0]
-CharacterB (right) answers, visibly opening and moving mouth in natural anime lip-sync articulation while speaking: S2: <d>[Japanese] 入力されたセリフB </d>
-
-overall_soundscape:
-Room ambience.
-non_diegetic_music:
-N/A
-
-[User Input Notes] (PROCESS THIS EXACTLY AS PROVIDED. DO NOT TRUNCATE.)
-Character Concept: {char_description}
-Situation & Media References: {シチュエーション}
-Dialogue / Voice: {セリフ_ボイス}
-Movement & Timing: {時間軸の動き}
-Retention / Prohibition: {禁止事項}
-Soundscape: {環境音}
-Music: {BGM}
-"""
-        prompt_result = self.generate_llm_prompt(provider, api_key, model_name, system_instruction)
+        raw_rules = load_system_rules()
+        sys_inst = raw_rules.format(
+            creative_instruction="",
+            char_description=char_description,
+            situation=シチュエーション,
+            timeline_seq=時間軸の動き,
+            quality_control=禁止事項,
+            ambient_sound=環境音,
+            bgm=BGM,
+        )
+    
+        prompt_result = self.generate_llm_prompt(provider, api_key, model_name, sys_inst)
 
         orig_dialogues = re.findall(r'<d>\[Japanese\]\s*(.*?)\s*<\/d>', 時間軸の動き, re.DOTALL)
         if orig_dialogues:
@@ -432,10 +375,6 @@ class OllamaVRAMUnloader:
         return (text,)
         
 
-# ==========================================
-# ノード 3: H3CharacterSubjectManager (複数キャラ管理)
-# ==========================================
-
 class H3CharacterSubjectManager:
     @classmethod
     def get_character_files(cls):
@@ -513,10 +452,6 @@ class H3CharacterSubjectManager:
         result_text = "\n\n".join(subjects)
         return (result_text,)
         
-
-# ==========================================
-# ノード 4: H3TimelineDirector (マルチショット・時間軸管理)
-# ==========================================
 
 class H3TimelineDirector:
     @classmethod
