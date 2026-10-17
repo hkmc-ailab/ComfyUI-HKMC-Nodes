@@ -9,13 +9,13 @@ class HKMCClipPromptDispatcher:
             }
         }
 
-    RETURN_TYPES = tuple(["STRING"] * 10)
-    RETURN_NAMES = tuple([f"prompt_c{i}" for i in range(1, 11)])
+    RETURN_TYPES = tuple(["STRING"] * 20)
+    RETURN_NAMES = tuple([f"prompt_c{i}" for i in range(1, 21)])
     FUNCTION = "dispatch"
     CATEGORY = "HKMC/utils"
 
     def dispatch(self, clip_prompt):
-        prompts = {str(i): "" for i in range(1, 11)}
+        prompts = {str(i): "" for i in range(1, 21)}
         try:
             if clip_prompt and clip_prompt.strip():
                 data = json.loads(clip_prompt)
@@ -25,7 +25,7 @@ class HKMCClipPromptDispatcher:
         except Exception as e:
             print(f"[HKMC Clip Prompt Dispatcher] JSON Parse Error: {e}")
             
-        return tuple(prompts[str(i)] for i in range(1, 11))
+        return tuple(prompts[str(i)] for i in range(1, 21))
 
 NODE_CLASS_MAPPINGS = {
     "HKMCClipPromptDispatcher": HKMCClipPromptDispatcher

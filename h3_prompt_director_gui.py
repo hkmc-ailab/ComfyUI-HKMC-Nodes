@@ -902,6 +902,9 @@ class H3PromptDirectorGUI:
             clip_prompt_json = json.dumps(parsed, ensure_ascii=False)
 
         images, keyframes, videos, audios = {}, {}, {}, {}
+        drive_audio = None
+        final_audio = None
+
         try:
             data = json.loads(kwargs.get("timeline_data", '{"items":[]}'))
             for item in data.get("items", []):
@@ -927,18 +930,32 @@ class H3PromptDirectorGUI:
                     a = load_audio_dict(val)
                     if a is not None:
                         audios[slot] = a
-        except Exception:
-            pass
+                elif mtype in ["drive_audio", "lip_sync", "drive"]:
+                    a = load_audio_dict(val)
+                    if a is not None:
+                        drive_audio = a
+                elif mtype in ["final_audio", "bgm", "music", "song"]:
+                    a = load_audio_dict(val)
+                    if a is not None:
+                        final_audio = a
+
+            bgm_val = kwargs.get("bgm", "").strip()
+            if final_audio is None and bgm_val:
+                final_audio = load_audio_dict(bgm_val)
+
+        except Exception as e:
+            print(f"Error parsing timeline_data in H3PromptDirectorGUI: {e}")
 
         media_bundle = {
             "images": images,
             "keyframes": keyframes,
             "videos": videos,
             "audios": audios,
+            "drive_audio": drive_audio,
+            "final_audio": final_audio,
         }
 
         return (prompt_result, clip_prompt_json, media_bundle)
-
 
 class H3MediaDispatcher:
     @classmethod
@@ -1027,12 +1044,20 @@ class H3MediaDispatcher:
             else None
         )
 
+        # ref_audio はナンバリング(0, 1, 2)から取得
         ref_audio_0 = audios.get(0)
         ref_audio_1 = audios.get(1)
         ref_audio_2 = audios.get(2)
         
-        drive_audio = audios.get(3)
-        final_audio = audios.get(4)
+        # drive_audio と final_audio は独立キーから直接取得
+        drive_audio = media_bundle.get("drive_audio")
+        final_audio = media_bundle.get("final_audio")
+
+        # 万が一、旧仕様のタイムラインで audios[3], audios[4] に入っていた場合の後方互換フォールバック
+        if drive_audio is None:
+            drive_audio = audios.get(3)
+        if final_audio is None:
+            final_audio = audios.get(4)
 
         raw_outputs = (
             first_frame,

@@ -17,6 +17,8 @@ from .h3_prompt_director_gui import (
     H3MediaDispatcher,
     HKMC_ModelSelector,
 )
+from .h3_prompt_director_mv import H3PromptDirector_MV
+
 from .save_audio_wav import SaveAudioWav
 from .h3_pipe import ToH3Pipe, FromH3Pipe, FromH3MediaPipe
 from .hkmc_clip_prompt_dispatcher import HKMCClipPromptDispatcher
@@ -33,6 +35,7 @@ NODE_CLASS_MAPPINGS = {
     "H3CharacterSubjectManager": H3CharacterSubjectManager,
     "H3TimelineDirector": H3TimelineDirector,
     "H3PromptDirectorGUI": H3PromptDirectorGUI,
+    "H3PromptDirector_MV": H3PromptDirector_MV,
     "HKMC_ModelSelector": HKMC_ModelSelector,
     "SaveAudioWav": SaveAudioWav,
     "ToH3Pipe": ToH3Pipe,
@@ -54,6 +57,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3CharacterSubjectManager": "H3 Character Subject Manager",
     "H3TimelineDirector": "H3 Timeline Director",
     "H3PromptDirectorGUI": "H3promptDirector(GUI)",
+    "H3PromptDirector_MV": "H3 Prompt Director (MV)",
     "HKMC_ModelSelector": "HKMC Model Selector",
     "SaveAudioWav": "Save Audio (WAV)",
     "ToH3Pipe": "To H3 Pipe",
