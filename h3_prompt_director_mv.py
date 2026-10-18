@@ -21,6 +21,14 @@ def load_rules_mv():
         with open(fallback_path, "r", encoding="utf-8") as f:
             return f.read()
     return ""
+    
+_CJK_RE = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]"
+)
+
+def contains_cjk(text):
+    """日本語のかな・漢字、中国語の漢字が含まれるかを確認する。"""
+    return bool(_CJK_RE.search(text or ""))
 
 def unload_ollama_vram(model_name):
     if not model_name: return
@@ -401,18 +409,20 @@ async def handle_generate_prompt_mv(request):
             return text.strip()
 
         characters = build_character_context(data)
-        subj_defs_lines = [c[2] for c in characters]
-        subject_definitions_text = "\n\n".join(subj_defs_lines) if subj_defs_lines else "[Subject 1: Performer]\nReference sheets for Performer include <Picture 1>."
-        
-        raw_rules = load_rules_mv()
-        sys_context = raw_rules.format(
-            char_description=subject_definitions_text,
-            situation="",
-            quality_control="",
-            bgm=""
+
+        subject_definitions_text = (
+            "\n\n".join(c[2] for c in characters)
+            if characters
+            else "[Subject 1: Performer]\nReference sheets for Performer include <Picture 1>."
         )
 
+        raw_rules = load_rules_mv()
+
         texts_to_translate = {}
+
+        for idx, _label, subject_text in characters:
+            texts_to_translate[f"subject_{idx}"] = subject_text
+
         clips_actions_to_translate = {}
 
         global_summary_raw = apply_char_replacements(data.get("global_summary", "").strip())
@@ -449,22 +459,78 @@ async def handle_generate_prompt_mv(request):
 
         translated_texts = {}
         if texts_to_translate:
-            trans_inst = """You are an expert translator. Translate the following Japanese texts into concise cinematic English.
-STRICT RULE 1: DO NOT use markdown. You MUST wrap each translation EXACTLY in the same XML tags as provided in the input. 
-STRICT RULE 2: DO NOT output any Japanese or Chinese characters. If you see Japanese/Chinese text like "【画風・トーン】", translate it to "[Style & Tone]:".
+            trans_inst = """You are a strict Japanese-to-English translation engine for cinematic video prompts.
+
+CRITICAL RULES:
+1. Translate every input value into natural, precise English.
+2. NEVER leave Japanese or Chinese characters in the translated values.
+3. If a character name is written in Japanese or Chinese, render it using Latin letters. Do not retain its original CJK characters.
+4. Preserve the structure [Subject X: CharacterName].
+5. Preserve structural tokens such as <Picture 1>, <Audio 1>, and <Subject 1> exactly when they are standalone reference tokens.
+6. Do not translate or alter the XML wrapper tags used to identify each field.
+7. Preserve the original meaning and all important details. Do not summarize or omit content.
+8. If the input is already English, preserve its meaning and wording.
+9. Output ONLY the translated values inside their matching XML wrapper tags. No markdown, explanations, or extra text.
 
 Input Texts:
 """
             for k, text in texts_to_translate.items():
                 trans_inst += f"<{k}>\n{text}\n</{k}>\n\n"
             try:
-                res_trans = await asyncio.to_thread(call_llm, trans_inst, provider, api_key, model_name, temp=0.2)
+                res_trans = await asyncio.to_thread(
+                    call_llm,
+                    trans_inst,
+                    provider,
+                    api_key,
+                    model_name,
+                    temp=0.2
+                )
+
                 for k in texts_to_translate.keys():
-                    m = re.search(fr"<{k}>\s*(.*?)\s*</{k}>", res_trans, re.DOTALL | re.IGNORECASE)
-                    translated_texts[k] = m.group(1).strip() if m else texts_to_translate[k]
+                    m = re.search(
+                        fr"<{k}>\s*(.*?)\s*</{k}>",
+                        res_trans,
+                        re.DOTALL | re.IGNORECASE
+                    )
+
+                    if not m:
+                        raise RuntimeError(
+                            f"Translation output is missing the expected tag: {k}"
+                        )
+
+                    translated = m.group(1).strip()
+
+                    if contains_cjk(translated):
+                        raise RuntimeError(
+                            f"Japanese/Chinese characters remain after translation: {k}"
+                        )
+
+                    translated_texts[k] = translated
+
             except Exception as e:
-                print(f"Translation error: {e}")
-                translated_texts = texts_to_translate
+                raise RuntimeError(
+                    "English translation failed. "
+                    "Prompt generation was stopped to prevent mixed-language output. "
+                    f"Details: {e}"
+                ) from e
+
+        if characters:
+            subject_definitions_text = "\n\n".join(
+                translated_texts[f"subject_{idx}"]
+                for idx, _label, _subject_text in characters
+            )
+        else:
+            subject_definitions_text = (
+                "[Subject 1: Performer]\n"
+                "Reference sheets for Performer include <Picture 1>."
+            )
+
+        sys_context = raw_rules.format(
+            char_description=subject_definitions_text,
+            situation="",
+            quality_control="",
+            bgm=""
+        )
 
         translated_shot_actions = {}
         if clips_actions_to_translate:
@@ -479,17 +545,60 @@ Input:
             for k, text in clips_actions_to_translate.items():
                 prompt_instruction += f"<clip_{k}>\n{text}\n</clip_{k}>\n\n"
             try:
-                result_text = await asyncio.to_thread(call_llm, prompt_instruction, provider, api_key, model_name, temp=0.2)
-                for k in clips_actions_to_translate.keys():
+                result_text = await asyncio.to_thread(
+                    call_llm,
+                    prompt_instruction,
+                    provider,
+                    api_key,
+                    model_name,
+                    temp=0.2
+                )
+
+                for k, text in clips_actions_to_translate.items():
+                    clip_m = re.search(
+                        fr"<clip_{k}>\s*(.*?)\s*</clip_{k}>",
+                        result_text,
+                        re.DOTALL | re.IGNORECASE
+                    )
+
+                    if not clip_m:
+                        raise RuntimeError(
+                            f"Missing translated clip tag: clip_{k}"
+                        )
+
+                    clip_content = clip_m.group(1)
                     translated_shot_actions[k] = {}
-                    clip_m = re.search(fr"<clip_{k}>\s*(.*?)\s*</clip_{k}>", result_text, re.DOTALL | re.IGNORECASE)
-                    clip_content = clip_m.group(1) if clip_m else clips_actions_to_translate[k]
-                    for j in range(1, 5):
-                        sm = re.search(fr"<s{j}>\s*(.*?)\s*</s{j}>", clip_content, re.DOTALL | re.IGNORECASE)
-                        if sm:
-                            translated_shot_actions[k][j] = sm.group(1).strip()
+
+                    expected_shots = [
+                        int(n) for n in re.findall(r"<s(\d+)>", text)
+                    ]
+
+                    for j in expected_shots:
+                        sm = re.search(
+                            fr"<s{j}>\s*(.*?)\s*</s{j}>",
+                            clip_content,
+                            re.DOTALL | re.IGNORECASE
+                        )
+
+                        if not sm:
+                            raise RuntimeError(
+                                f"Missing translated Shot tag: clip_{k}, s{j}"
+                            )
+
+                        translated_action = sm.group(1).strip()
+
+                        if contains_cjk(translated_action):
+                            raise RuntimeError(
+                                f"Japanese/Chinese characters remain: clip_{k}, s{j}"
+                            )
+
+                        translated_shot_actions[k][j] = translated_action
+
             except Exception as e:
-                print(f"Action translation error: {e}")
+                raise RuntimeError(
+                    "Shot action English translation failed. "
+                    f"Details: {e}"
+                ) from e
 
         if provider == "Ollama (Local)" and (texts_to_translate or clips_actions_to_translate):
             await asyncio.to_thread(unload_ollama_vram, model_name or "qwen2.5:7b-instruct-q5_K_M")
@@ -499,7 +608,6 @@ Input:
 
         final_clip_prompts = {}
         for i in range(1, 15):
-            # ▼ 単一クリップ指定がある場合、該当クリップ以外はプロンプト結合処理もスキップ
             if target_clip and str(i) != target_clip:
                 continue
 
@@ -550,8 +658,16 @@ Input:
                     raw_action = apply_char_replacements(data.get(f"c{i}_s{j}_action", "").strip())
                     action_text = raw_action
                 
-                action_text = re.sub(r"^\[Shot\s*\d+[^\]]*\]\s*", "", action_text).strip()
-                action_text = re.sub(r"[^\x00-\x7F]+", "", action_text).strip()
+                action_text = re.sub(
+                    r"^\[Shot\s*\d+[^\]]*\]\s*",
+                    "",
+                    action_text
+                ).strip()
+
+                if contains_cjk(action_text):
+                    raise RuntimeError(
+                        f"Clip {i}, Shot {j}: Japanese/Chinese text remains."
+                    )
 
                 shot_block = []
                 if j > 1:
@@ -588,7 +704,21 @@ Input:
             sec_soundscape = f"overall_soundscape:\n{c_ambient_sound}"
             sec_music = "non_diegetic_music:\nThe protected master-song audio drives the vocal expression and rhythmic momentum."
 
-            full_prompt = f"{sec_subject}\n\n{sec_summary}\n\n{sec_retention}\n\n{sec_detailed}\n\n{sec_soundscape}\n\n{sec_music}"
+            full_prompt = (
+                f"{sec_subject}\n\n"
+                f"{sec_summary}\n\n"
+                f"{sec_retention}\n\n"
+                f"{sec_detailed}\n\n"
+                f"{sec_soundscape}\n\n"
+                f"{sec_music}"
+            )
+
+            if contains_cjk(full_prompt):
+                raise RuntimeError(
+                    f"Clip {i}: Final prompt contains Japanese/Chinese characters. "
+                    "Check character descriptions and translation results."
+                )
+
             final_clip_prompts[str(i)] = full_prompt
 
         return web.json_response({"success": True, "clip_prompts": final_clip_prompts})
