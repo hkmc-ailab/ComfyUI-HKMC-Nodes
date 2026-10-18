@@ -258,7 +258,6 @@ def load_audio_dict(filename):
         print(f"[H3 Prompt Director MV] Failed to load audio '{filename}': {exc}")
         return None
 
-# --- API: 楽曲解析＆絵コンテ自動生成 ---
 @PromptServer.instance.routes.post("/h3/generate_storyboard_mv")
 async def handle_generate_storyboard_mv(request):
     try:
@@ -362,11 +361,15 @@ Shot 1: （[カメラ構図名]: Clip 1とは異なる角度・距離からの�
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
-# --- API: クリッププロンプト構築・翻訳 ---
 @PromptServer.instance.routes.post("/h3/generate_prompt_mv")
 async def handle_generate_prompt_mv(request):
     try:
         data = await request.json()
+        
+        target_clip = data.get("target_clip", None)
+        if target_clip:
+            target_clip = str(target_clip)
+
         compact_clip_state = data.get("clips_data_json", "{}")
         try:
             decoded_clip_state = json.loads(compact_clip_state) if isinstance(compact_clip_state, str) else compact_clip_state
@@ -412,7 +415,6 @@ async def handle_generate_prompt_mv(request):
         texts_to_translate = {}
         clips_actions_to_translate = {}
 
-        # ▼ 修正ポイント: 全体演出とスタイル維持を強制英訳リストに追加
         global_summary_raw = apply_char_replacements(data.get("global_summary", "").strip())
         if global_summary_raw: texts_to_translate["g_sum"] = global_summary_raw
 
@@ -420,6 +422,9 @@ async def handle_generate_prompt_mv(request):
         if global_retention_raw: texts_to_translate["g_ret"] = global_retention_raw
 
         for i in range(1, 15):
+            if target_clip and str(i) != target_clip:
+                continue
+
             if data.get(f"c{i}_enabled", False):
                 sum_raw = apply_char_replacements(data.get(f"c{i}_summary", "").strip())
                 ret_raw = apply_char_replacements(data.get(f"c{i}_retention", "").strip())
@@ -494,6 +499,10 @@ Input:
 
         final_clip_prompts = {}
         for i in range(1, 15):
+            # ▼ 単一クリップ指定がある場合、該当クリップ以外はプロンプト結合処理もスキップ
+            if target_clip and str(i) != target_clip:
+                continue
+
             if not data.get(f"c{i}_enabled", False):
                 continue
                 
