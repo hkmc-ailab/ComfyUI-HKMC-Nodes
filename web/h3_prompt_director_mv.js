@@ -340,7 +340,7 @@ app.registerExtension({
                             <li><b>おすすめ・ロングテイク（1クリップ約10秒尺）</b>： 全 <b>${clips10s}</b> クリップで完走（Clip 1: 10.0s / 2以降: 実質 +8.38s）</li>
                         </ul>
                         <div class="h3-guide-current">
-                             <b>現在の設定状況:</b> 有効クリップ数 = <b>${enabledCount} クリップ</b>（10秒尺設定なら 約 <b>${coveredSec.toFixed(1)} 秒</b> 地点までカバー中）
+                            <b>現在の設定状況:</b> 有効クリップ数 = <b>${enabledCount} クリップ</b>（10秒尺設定なら 約 <b>${coveredSec.toFixed(1)} 秒</b> 地点までカバー中）
                         </div>
                     `;
 
@@ -423,7 +423,6 @@ app.registerExtension({
                 fixedMediaArea.append(mediaResizerBar, mediaBody);
                 root.append(tabBar, contentArea, fixedMediaArea);
 
-                // ▼ 修正: LLMが独自に使用するあらゆる英語見出し（Scene, Lighting, Camera, Vibe等）や日本語見出しに対応
                 const applyStoryboardToClips = (text) => {
                     if (!text || !text.trim()) return;
                     
@@ -492,7 +491,7 @@ app.registerExtension({
                         const durationRow = document.createElement("div");
                         durationRow.style.cssText = "display:flex; align-items:center; gap:8px;";
                         const durationLabel = document.createElement("label");
-                        durationLabel.textContent = "1クリップの基本生成尺 (秒):";
+                        durationLabel.textContent = " 1クリップの基本生成尺 (秒):";
                         durationLabel.style.cssText = "font-size:11px; color:#dbe0e6;";
                         const durationInput = document.createElement("input");
                         durationInput.type = "number"; durationInput.min = "1"; durationInput.step = "0.5";
@@ -604,7 +603,7 @@ app.registerExtension({
                         const totalMusicRow = document.createElement("div");
                         totalMusicRow.style.cssText = "display:flex; align-items:center; gap:8px; margin-bottom:8px; background:#181818; padding:8px 12px; border-radius:8px; border:1px solid #383838;";
                         const totalMusicLabel = document.createElement("label");
-                        totalMusicLabel.textContent = "楽曲の総時間 (秒):";
+                        totalMusicLabel.textContent = "🎵 楽曲の総時間 (秒):";
                         totalMusicLabel.style.cssText = "font-size:11px; font-weight:bold; color:#dbe0e6;";
                         const totalMusicInput = document.createElement("input");
                         totalMusicInput.type = "number"; totalMusicInput.min = "0"; totalMusicInput.step = "0.1";
@@ -698,24 +697,87 @@ app.registerExtension({
                         
                         contentArea.append(titlePrompt, buildPlanGuideBanner("guide-banner-prompt"));
 
-                        const genBtn = document.createElement("button"); genBtn.className = "h3-btn-gen-prompt"; genBtn.innerHTML = `<span>▶ クリッププロンプトを構築・翻訳</span>`;
+                        const genBtn = document.createElement("button"); genBtn.className = "h3-btn-gen-prompt"; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳</span>`;
                         const clipResContainer = document.createElement("div"); clipResContainer.className = "h3-clip-results-container";
 
                         const genClipWidget = wMap["generated_clip_prompts"];
-                        const updateClipResultsUI = (clipData) => {
+                        
+                        // ▼ 追加: 有効なすべてのクリップを一覧で表示し、それぞれに個別生成ボタンを配置
+                        const updateClipResultsUI = () => {
                             clipResContainer.replaceChildren();
-                            if (!clipData || typeof clipData !== "object") return;
+                            let clipData = {};
+                            try { clipData = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
+
                             for (let i = 1; i <= 14; i++) {
-                                if (clipData[i]) {
-                                    const t = document.createElement("div"); t.className = "h3-clip-result-title"; t.textContent = `クリップ ${i} プロンプト (直接編集可能)`;
-                                    const cta = document.createElement("textarea"); cta.className = "h3-clip-result-textarea"; cta.value = clipData[i];
-                                    cta.oninput = () => { try { const current = JSON.parse(genClipWidget.value || "{}"); current[String(i)] = cta.value; genClipWidget.value = JSON.stringify(current); if (genClipWidget.callback) genClipWidget.callback(genClipWidget.value); } catch(e) {} };
-                                    clipResContainer.append(t, cta);
+                                // 有効（🟢）になっているクリップのみを表示する
+                                if (getV(`c${i}_enabled`, i === 1)) {
+                                    const headerBar = document.createElement("div");
+                                    headerBar.style.cssText = "display:flex; justify-content:space-between; align-items:flex-end; margin-top:4px;";
+                                    
+                                    const t = document.createElement("div"); 
+                                    t.className = "h3-clip-result-title"; 
+                                    t.style.marginTop = "0";
+                                    t.textContent = `クリップ ${i} プロンプト (直接編集可能)`;
+                                    
+                                    const singleBtn = document.createElement("button");
+                                    singleBtn.textContent = "［このクリップのみを構築・翻訳］";
+                                    singleBtn.title = `クリップ${i}のみをLLMに翻訳させます`;
+                                    singleBtn.style.cssText = "background:#1e2430; border:1px solid #324765; color:#5bb3f5; font-size:10px; font-weight:bold; padding:3px 8px; border-radius:4px; cursor:pointer; transition:all 0.1s;";
+                                    singleBtn.onmouseenter = () => { singleBtn.style.background = "#2b3446"; };
+                                    singleBtn.onmouseleave = () => { singleBtn.style.background = "#1e2430"; };
+
+                                    headerBar.append(t, singleBtn);
+
+                                    const cta = document.createElement("textarea"); 
+                                    cta.className = "h3-clip-result-textarea"; 
+                                    cta.value = clipData[i] || "";
+                                    
+                                    cta.oninput = () => { 
+                                        try { 
+                                            const current = JSON.parse(genClipWidget.value || "{}"); 
+                                            current[String(i)] = cta.value; 
+                                            genClipWidget.value = JSON.stringify(current); 
+                                            if (genClipWidget.callback) genClipWidget.callback(genClipWidget.value); 
+                                        } catch(e) {} 
+                                    };
+
+                                    // 個別生成ボタンの処理
+                                    singleBtn.onclick = async () => {
+                                        singleBtn.disabled = true; 
+                                        singleBtn.textContent = "⏳ 構築中...";
+                                        
+                                        const payload = { target_clip: i }; // Python側にクリップ番号を伝える
+                                        node.widgets.forEach(w => { payload[w.name] = w.value; });
+                                        try {
+                                            const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                            Object.assign(payload, parsed);
+                                        } catch(e) {}
+                                        
+                                        try {
+                                            const res = await api.fetchApi("/h3/generate_prompt_mv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+                                            const data = await res.json();
+                                            if (data.success && data.clip_prompts && data.clip_prompts[i]) {
+                                                cta.value = data.clip_prompts[i];
+                                                cta.oninput(); // 保存処理をトリガー
+                                            } else { 
+                                                alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); 
+                                            }
+                                        } catch (err) { 
+                                            alert("通信エラー: " + err.message); 
+                                        } finally { 
+                                            singleBtn.disabled = false; 
+                                            singleBtn.textContent = "［このクリップのみを構築・翻訳］"; 
+                                        }
+                                    };
+
+                                    clipResContainer.append(headerBar, cta);
                                 }
                             }
                         };
-                        if (genClipWidget && genClipWidget.value) { try { updateClipResultsUI(JSON.parse(genClipWidget.value)); } catch(e){} }
+                        
+                        if (genClipWidget) { updateClipResultsUI(); }
 
+                        // 全体生成ボタンの処理（変更なし・上書きマージのみ）
                         genBtn.onclick = async () => {
                             genBtn.disabled = true; genBtn.innerHTML = `<span>⏳ プロンプト構築中... (LLM通信中)</span>`;
                             const payload = {};
@@ -729,13 +791,17 @@ app.registerExtension({
                                 const res = await api.fetchApi("/h3/generate_prompt_mv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
                                 const data = await res.json();
                                 if (data.success && data.clip_prompts) {
-                                    const strData = JSON.stringify(data.clip_prompts);
+                                    let current = {};
+                                    try { current = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
+                                    Object.assign(current, data.clip_prompts); // 既存を維持しつつ上書き
+                                    const strData = JSON.stringify(current);
                                     if (genClipWidget) { genClipWidget.value = strData; if (genClipWidget.callback) genClipWidget.callback(strData); }
-                                    updateClipResultsUI(data.clip_prompts);
+                                    updateClipResultsUI();
                                 } else { alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); }
                             } catch (err) { alert("通信エラー: " + err.message); } 
-                            finally { genBtn.disabled = false; genBtn.innerHTML = `<span>▶ クリッププロンプトを構築・翻訳</span>`; }
+                            finally { genBtn.disabled = false; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳</span>`; }
                         };
+                        
                         contentArea.append(genBtn, clipResContainer);
                         updatePlanGuide();
                     }
