@@ -1,6 +1,9 @@
 import os
 import re
 import json
+import base64
+import asyncio
+import mimetypes
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -8,14 +11,12 @@ from PIL import Image, ImageOps
 import cv2
 import torchaudio
 import requests
-import google.generativeai as genai
 from openai import OpenAI
 import folder_paths
 import scipy.io.wavfile as wavfile
 from server import PromptServer
 from aiohttp import web
 
-# --- ヘルパー関数群 ---
 
 def load_system_rules(is_auto=False):
     filename = "rules_auto.txt" if is_auto else "rules.txt"
@@ -193,42 +194,111 @@ def unload_ollama_vram(model_name):
 def contains_japanese(text):
     return bool(re.search(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', text))
 
-def call_llm(sys_inst, provider, api_key, model_name, temp=0.7):
+def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None):
     if provider == "Gemini (Cloud)":
-        active_key = api_key if api_key and api_key.strip() else os.getenv("GEMINI_API_KEY")
-        if not active_key:
-            raise ValueError("Gemini API Keyが設定されていません。")
-        genai.configure(api_key=active_key)
-        model = genai.GenerativeModel(model_name or "gemini-2.5-flash")
-        return model.generate_content(sys_inst).text.strip()
+        raw_key = api_key if (api_key and api_key.strip()) else (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
+        active_key = raw_key.strip().strip('"').strip("'").strip()
+
+        if active_key:
+            masked = active_key[:4] + "..." + active_key[-4:] if len(active_key) > 8 else "***"
+            source = "UI直接入力" if (api_key and api_key.strip()) else "環境変数"
+            print(f"[H3 Prompt Director GUI] Gemini APIキー使用中 ({source}): {masked} (文字数: {len(active_key)})")
+        else:
+            raise ValueError("Gemini API Key is missing. Please set it in the UI or as an environment variable (GEMINI_API_KEY or GOOGLE_API_KEY).")
+
+        target_model = model_name.strip() if model_name and model_name.strip() else "gemini-3.8-flash"
+        
+        parts = [{"text": sys_inst}]
+        raw_audio_bytes = None
+        audio_mime = "audio/wav"
+        if audio_path and os.path.exists(audio_path):
+            try:
+                guessed_mime, _ = mimetypes.guess_type(audio_path)
+                audio_mime = guessed_mime or "audio/wav"
+                with open(audio_path, "rb") as f:
+                    raw_audio_bytes = f.read()
+                b64_audio = base64.b64encode(raw_audio_bytes).decode("utf-8")
+                parts.append({
+                    "inline_data": {
+                        "mime_type": audio_mime,
+                        "data": b64_audio
+                    }
+                })
+            except Exception as e:
+                print(f"[H3 Prompt Director GUI] 音声読み込みエラー: {e}")
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {"temperature": temp}
+        }
+        url_base = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
+
+        headers_bearer = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {active_key}"
+        }
+        res1 = requests.post(url_base, headers=headers_bearer, json=payload, timeout=600)
+        if res1.status_code == 200:
+            try:
+                return res1.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                pass
+
+        headers_apikey = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": active_key
+        }
+        res2 = requests.post(url_base, headers=headers_apikey, json=payload, timeout=600)
+        if res2.status_code == 200:
+            try:
+                return res2.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                pass
+
+        try:
+            import google.generativeai as legacy_genai
+            legacy_genai.configure(api_key=active_key, transport="rest")
+            g_model = legacy_genai.GenerativeModel(model_name=target_model, generation_config={"temperature": temp})
+            contents_sdk = [sys_inst]
+            if raw_audio_bytes:
+                contents_sdk.append({"mime_type": audio_mime, "data": raw_audio_bytes})
+            sdk_res = g_model.generate_content(contents_sdk)
+            if getattr(sdk_res, "text", None):
+                return sdk_res.text.strip()
+        except Exception:
+            pass
+
+        err_detail = res1.text if res1.text else res2.text
+        raise RuntimeError(f"Gemini API 認証エラー: {err_detail}")
 
     elif provider == "ChatGPT (OpenAI)":
-        active_key = api_key if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY")
+        active_key = (api_key.strip() if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY", "")).strip()
         if not active_key:
             raise ValueError("OpenAI API Keyが設定されていません。")
-        client = OpenAI(api_key=active_key)
+        client = OpenAI(api_key=active_key, timeout=600.0)
         response = client.chat.completions.create(
-            model=model_name or "gpt-4o",
+            model=model_name.strip() if model_name and model_name.strip() else "gpt-4o",
             messages=[{
                 "role": "system",
                 "content": "You are an expert translator and prompt engineer."
             }, {"role": "user", "content": sys_inst}],
             temperature=temp,
         )
-        return response.choices[0].message.content.strip()
+        return (response.choices[0].message.content or "").strip()
 
     elif provider == "Ollama (Local)":
+        target_model = model_name.strip() if model_name and model_name.strip() else "qwen2.5:7b-instruct-q5_K_M"
         url = "http://localhost:11434/api/generate"
         payload = {
-            "model": model_name or "qwen2.5:7b-instruct-q5_K_M",
+            "model": target_model,
             "prompt": sys_inst,
             "stream": False,
             "options": {"temperature": temp},
         }
-        res = requests.post(url, json=payload, timeout=300)
+        res = requests.post(url, json=payload, timeout=900)
         res.raise_for_status()
         prompt_result = res.json().get("response", "").strip()
-        unload_ollama_vram(model_name or "qwen2.5:7b-instruct-q5_K_M")
+        unload_ollama_vram(target_model)
         return prompt_result
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
@@ -517,7 +587,7 @@ async def handle_generate_auto_scenario(request):
         story = auto_data.get("story", "")
         clip_count = int(auto_data.get("clipCount", 1))
         no_clips = auto_data.get("noClips", False)
-        duration = int(auto_data.get("duration", 5)) # デフォルト5秒
+        duration = int(auto_data.get("duration", 5))
         
         clip_actual_duration = round(max(0, duration - 1.6), 1)
         total_duration = round(duration + (clip_actual_duration * clip_count), 1) if not no_clips else float(duration)
@@ -569,7 +639,7 @@ async def handle_generate_auto_scenario(request):
         api_key = data.get("llm_api_key", "")
         model_name = data.get("llm_model", "").strip()
         
-        auto_text = call_llm(sys_prompt, provider, api_key, model_name, temp=0.7)
+        auto_text = await asyncio.to_thread(call_llm, sys_prompt, provider, api_key, model_name, 0.7)
         
         scenario = {"base": {}, "clips": {}}
         current_video = None
@@ -641,7 +711,7 @@ async def handle_generate_prompt(request):
     try:
         data = await request.json()
         
-        prompt_result = build_and_generate_prompt(data)
+        prompt_result = await asyncio.to_thread(build_and_generate_prompt, data)
         
         clip_prompts_out = {}
         clips_to_translate = {}
@@ -649,7 +719,7 @@ async def handle_generate_prompt(request):
         for i in range(1, 11):
             if data.get(f"c{i}_enabled", False):
                 clip_text_parts = []
-                is_clip_silent = False # このクリップ全体でセリフなしかどうかのフラグ
+                is_clip_silent = False
                 
                 for j in range(1, 5):
                     if data.get(f"c{i}_s{j}_enabled", False):
@@ -690,7 +760,7 @@ async def handle_generate_prompt(request):
                         clip_prompts_out[i] = txt
                         
         if clips_to_translate:
-            translated = translate_clip_texts(clips_to_translate, data)
+            translated = await asyncio.to_thread(translate_clip_texts, clips_to_translate, data)
             for k, v in translated.items():
                 clip_prompts_out[k] = v
                 
@@ -1044,16 +1114,13 @@ class H3MediaDispatcher:
             else None
         )
 
-        # ref_audio はナンバリング(0, 1, 2)から取得
         ref_audio_0 = audios.get(0)
         ref_audio_1 = audios.get(1)
         ref_audio_2 = audios.get(2)
         
-        # drive_audio と final_audio は独立キーから直接取得
         drive_audio = media_bundle.get("drive_audio")
         final_audio = media_bundle.get("final_audio")
 
-        # 万が一、旧仕様のタイムラインで audios[3], audios[4] に入っていた場合の後方互換フォールバック
         if drive_audio is None:
             drive_audio = audios.get(3)
         if final_audio is None:
