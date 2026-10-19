@@ -1479,11 +1479,16 @@ app.registerExtension({
                             });
 
                             try {
-                                const res = await api.fetchApi("/h3/generate_auto_scenario", {
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10分待機
+
+                                const res = await fetch("/h3/generate_auto_scenario", {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify(payload)
+                                    body: JSON.stringify(payload),
+                                    signal: controller.signal
                                 });
+                                clearTimeout(timeoutId);
                                 const data = await res.json();
                                 if (data.success) {
                                     if (data.base_shots) {
@@ -1671,11 +1676,16 @@ app.registerExtension({
                             }
 
                             try {
-                                const res = await api.fetchApi("/h3/generate_prompt", {
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10分待機
+
+                                const res = await fetch("/h3/generate_prompt", {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify(payload)
+                                    body: JSON.stringify(payload),
+                                    signal: controller.signal
                                 });
+                                clearTimeout(timeoutId);
                                 const data = await res.json();
                                 if (data.success) {
                                     if (data.prompt) {
