@@ -199,18 +199,13 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
         raw_key = api_key if (api_key and api_key.strip()) else (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
         active_key = raw_key.strip().strip('"').strip("'").strip()
 
-        if active_key:
-            masked = active_key[:4] + "..." + active_key[-4:] if len(active_key) > 8 else "***"
-            source = "UI直接入力" if (api_key and api_key.strip()) else "環境変数"
-            print(f"[H3 Prompt Director GUI] Gemini APIキー使用中 ({source}): {masked} (文字数: {len(active_key)})")
-        else:
+        if not active_key:
             raise ValueError("Gemini API Key is missing. Please set it in the UI or as an environment variable (GEMINI_API_KEY or GOOGLE_API_KEY).")
 
-        target_model = model_name.strip() if model_name and model_name.strip() else "gemini-3.8-flash"
+        raw_model = model_name.strip() if model_name and model_name.strip() else "gemini-2.5-flash"
+        clean_model = raw_model.replace("models/", "").strip()
         
         parts = [{"text": sys_inst}]
-        raw_audio_bytes = None
-        audio_mime = "audio/wav"
         if audio_path and os.path.exists(audio_path):
             try:
                 guessed_mime, _ = mimetypes.guess_type(audio_path)
@@ -225,51 +220,39 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
                     }
                 })
             except Exception as e:
-                print(f"[H3 Prompt Director GUI] 音声読み込みエラー: {e}")
+                print(f"[H3 Prompt Director] 音声読み込みエラー: {e}")
 
         payload = {
             "contents": [{"parts": parts}],
             "generationConfig": {"temperature": temp}
         }
-        url_base = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
 
-        headers_bearer = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {active_key}"
-        }
-        res1 = requests.post(url_base, headers=headers_bearer, json=payload, timeout=600)
-        if res1.status_code == 200:
-            try:
-                return res1.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
-                pass
-
-        headers_apikey = {
+        headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": active_key
         }
-        res2 = requests.post(url_base, headers=headers_apikey, json=payload, timeout=600)
-        if res2.status_code == 200:
-            try:
-                return res2.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
-                pass
 
-        try:
-            import google.generativeai as legacy_genai
-            legacy_genai.configure(api_key=active_key, transport="rest")
-            g_model = legacy_genai.GenerativeModel(model_name=target_model, generation_config={"temperature": temp})
-            contents_sdk = [sys_inst]
-            if raw_audio_bytes:
-                contents_sdk.append({"mime_type": audio_mime, "data": raw_audio_bytes})
-            sdk_res = g_model.generate_content(contents_sdk)
-            if getattr(sdk_res, "text", None):
-                return sdk_res.text.strip()
-        except Exception:
-            pass
+        api_versions = ["v1beta", "v1"]
+        last_res = None
 
-        err_detail = res1.text if res1.text else res2.text
-        raise RuntimeError(f"Gemini API 認証エラー: {err_detail}")
+        for ver in api_versions:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{clean_model}:generateContent"
+            res = requests.post(url, headers=headers, json=payload, timeout=600)
+            last_res = res
+
+            if res.status_code == 200:
+                try:
+                    return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                except Exception as parse_e:
+                    raise RuntimeError(f"Geminiレスポンス解析エラー: {parse_e}")
+            elif res.status_code == 404:
+                continue
+            else:
+                
+                raise RuntimeError(f"Gemini API 認証・通信エラー ({res.status_code}): {res.text}")
+
+        err_text = last_res.text if last_res is not None else "Not Found"
+        raise RuntimeError(f"指定されたモデル名 '{clean_model}' は v1beta / v1 のいずれでも見つかりませんでした (404): {err_text}")
 
     elif provider == "ChatGPT (OpenAI)":
         active_key = (api_key.strip() if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY", "")).strip()
@@ -822,7 +805,7 @@ class H3PromptDirectorGUI:
                 "use_custom_prompt": ("BOOLEAN", {"default": False}),
                 "custom_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "llm_provider": (
-                    ["Ollama (Local)", "Gemini (Cloud)", "ChatGPT (OpenAI)"],
+                    ["Ollama (Local)", "❌️Gemini (Cloud)", "ChatGPT (OpenAI)"],
                     {"default": "Ollama (Local)"},
                 ),
                 "llm_api_key": ("STRING", {"default": ""}),
