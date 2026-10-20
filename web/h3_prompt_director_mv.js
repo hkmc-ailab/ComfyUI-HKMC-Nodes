@@ -132,6 +132,23 @@ app.registerExtension({
                     if (updatePlanGuide) updatePlanGuide();
                 };
 
+                const getConnectedDirectivesJson = () => {
+                    const inputSlot = node.inputs?.find(inp => inp.name === "design_directives");
+                    if (inputSlot && inputSlot.link != null) {
+                        const linkInfo = app.graph.links[inputSlot.link];
+                        if (linkInfo) {
+                            const sourceNode = app.graph.getNodeById(linkInfo.origin_id);
+                            if (sourceNode) {
+                                const dWidget = sourceNode.widgets?.find(w => w.name === "design_data_json");
+                                if (dWidget && dWidget.value) {
+                                    return dWidget.value;
+                                }
+                            }
+                        }
+                    }
+                    return "";
+                };
+
                 let state = { items: [] };
                 try { if (wMap["timeline_data"] && wMap["timeline_data"].value) state = JSON.parse(wMap["timeline_data"].value); } catch (e) {}
 
@@ -503,7 +520,7 @@ app.registerExtension({
 
                         const audioOptions = [
                             { value: "auto", label: "自動判別 (Geminiなら直接音源解析 / その他はPython波形解析)" },
-                            { value: "gemini_audio", label: "Gemini 直接音源解析 (音を耳で聴いてボーカル・展開を判別)" },
+                            { value: "gemini_audio", label: "❌️Gemini 直接音源解析 (音を耳で聴いてボーカル・展開を判別)" },
                             { value: "python_wave", label: "Python 波形エネルギー解析 (Ollama/ChatGPT向け)" }
                         ];
                         analysisBlock.appendChild(bindVSelect("audio_analysis_mode", "解析モードの選択", audioOptions, "auto"));
@@ -533,6 +550,9 @@ app.registerExtension({
 
                         genSbBtn.onclick = async () => {
                             genSbBtn.disabled = true; genSbBtn.innerHTML = `<span>⏳ 楽曲を解析中... (LLM通信中)</span>`;
+                            
+                            const connectedDirectivesJson = getConnectedDirectivesJson();
+
                             const payload = {
                                 global_summary: getV("global_summary", ""),
                                 global_retention: getV("global_retention", ""),
@@ -541,14 +561,28 @@ app.registerExtension({
                                 timeline_data: wMap["timeline_data"]?.value || '{"items":[]}',
                                 llm_provider: wMap["llm_provider"]?.value || "Ollama (Local)",
                                 llm_api_key: wMap["llm_api_key"]?.value || "",
-                                llm_model: wMap["llm_model"]?.value || ""
+                                llm_model: wMap["llm_model"]?.value || "",
+                                design_directives_json: connectedDirectivesJson
                             };
                             try {
-                                const res = await api.fetchApi("/h3/generate_storyboard_mv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 600000);
+
+                                const res = await fetch("/h3/generate_storyboard_mv", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify(payload),
+                                    signal: controller.signal
+                                });
+                                clearTimeout(timeoutId);
+
                                 const data = await res.json();
                                 if (data.success && data.storyboard) {
                                     sbTextarea.value = data.storyboard;
                                     setV("storyboard_draft", data.storyboard);
+                                    if (data.audio_stats) {
+                                        setV("audio_stats", data.audio_stats);
+                                    }
                                 } else { alert("絵コンテ生成エラー: " + (data.error || "不明なエラー")); }
                             } catch (e) { alert("通信エラー: " + e.message); }
                             finally { genSbBtn.disabled = false; genSbBtn.innerHTML = `<span>▶ 楽曲を解析して全体絵コンテを自動生成 (LLM)</span>`; }
@@ -617,9 +651,26 @@ app.registerExtension({
                         const clipGrid = document.createElement("div");
                         clipGrid.style.display = "grid"; clipGrid.style.gridTemplateColumns = "repeat(7, 1fr)"; clipGrid.style.gap = "6px"; clipGrid.style.marginBottom = "8px";
 
+                        let audioStats = getV("audio_stats", {});
+
                         for (let i = 1; i <= 14; i++) {
                             const isEnabled = getV(`c${i}_enabled`, i === 1);
-                            const indicator = isEnabled ? "🟢" : "⚫";
+                            let indicator = "⚫";
+                            if (isEnabled) {
+                                const stat = audioStats[String(i)];
+                                if (stat) {
+                                    let dot = "🟢";
+                                    if (stat.tier === "LOW") dot = "🔵";
+                                    else if (stat.tier === "MID") dot = "🟡";
+                                    else if (stat.tier === "HIGH") dot = "🔴";
+                                    
+                                    if (stat.trans) dot += "🔀";
+                                    indicator = dot;
+                                } else {
+                                    indicator = "🟢";
+                                }
+                            }
+                            
                             const btn = document.createElement("div");
                             btn.innerHTML = `<span style="font-size:8px; margin-right:4px; pointer-events:none;">${indicator}</span>C${i}`;
                             const isActive = (activeClipTab === i);
@@ -702,14 +753,12 @@ app.registerExtension({
 
                         const genClipWidget = wMap["generated_clip_prompts"];
                         
-                        // ▼ 追加: 有効なすべてのクリップを一覧で表示し、それぞれに個別生成ボタンを配置
                         const updateClipResultsUI = () => {
                             clipResContainer.replaceChildren();
                             let clipData = {};
                             try { clipData = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
 
                             for (let i = 1; i <= 14; i++) {
-                                // 有効（🟢）になっているクリップのみを表示する
                                 if (getV(`c${i}_enabled`, i === 1)) {
                                     const headerBar = document.createElement("div");
                                     headerBar.style.cssText = "display:flex; justify-content:space-between; align-items:flex-end; margin-top:4px;";
@@ -741,12 +790,14 @@ app.registerExtension({
                                         } catch(e) {} 
                                     };
 
-                                    // 個別生成ボタンの処理
                                     singleBtn.onclick = async () => {
                                         singleBtn.disabled = true; 
                                         singleBtn.textContent = "⏳ 構築中...";
                                         
-                                        const payload = { target_clip: i }; // Python側にクリップ番号を伝える
+                                        const payload = { 
+                                            target_clip: i,
+                                            design_directives_json: getConnectedDirectivesJson() // ★ 追加
+                                        };
                                         node.widgets.forEach(w => { payload[w.name] = w.value; });
                                         try {
                                             const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
@@ -754,11 +805,21 @@ app.registerExtension({
                                         } catch(e) {}
                                         
                                         try {
-                                            const res = await api.fetchApi("/h3/generate_prompt_mv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+                                            const controller = new AbortController();
+                                            const timeoutId = setTimeout(() => controller.abort(), 600000);
+
+                                            const res = await fetch("/h3/generate_prompt_mv", {
+                                                method: "POST",
+                                                headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify(payload),
+                                                signal: controller.signal
+                                            });
+                                            clearTimeout(timeoutId);
+
                                             const data = await res.json();
                                             if (data.success && data.clip_prompts && data.clip_prompts[i]) {
                                                 cta.value = data.clip_prompts[i];
-                                                cta.oninput(); // 保存処理をトリガー
+                                                cta.oninput();
                                             } else { 
                                                 alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); 
                                             }
@@ -777,10 +838,11 @@ app.registerExtension({
                         
                         if (genClipWidget) { updateClipResultsUI(); }
 
-                        // 全体生成ボタンの処理（変更なし・上書きマージのみ）
                         genBtn.onclick = async () => {
                             genBtn.disabled = true; genBtn.innerHTML = `<span>⏳ プロンプト構築中... (LLM通信中)</span>`;
-                            const payload = {};
+                            const payload = {
+                                design_directives_json: getConnectedDirectivesJson() // ★ 追加
+                            };
                             node.widgets.forEach(w => { payload[w.name] = w.value; });
                             try {
                                 const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
@@ -788,12 +850,22 @@ app.registerExtension({
                             } catch(e) {}
                             
                             try {
-                                const res = await api.fetchApi("/h3/generate_prompt_mv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 600000);
+
+                                const res = await fetch("/h3/generate_prompt_mv", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify(payload),
+                                    signal: controller.signal
+                                });
+                                clearTimeout(timeoutId);
+
                                 const data = await res.json();
                                 if (data.success && data.clip_prompts) {
                                     let current = {};
                                     try { current = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
-                                    Object.assign(current, data.clip_prompts); // 既存を維持しつつ上書き
+                                    Object.assign(current, data.clip_prompts);
                                     const strData = JSON.stringify(current);
                                     if (genClipWidget) { genClipWidget.value = strData; if (genClipWidget.callback) genClipWidget.callback(strData); }
                                     updateClipResultsUI();
@@ -960,7 +1032,6 @@ app.registerExtension({
                     audLane.style.flexWrap = "wrap";
                     audBlock.appendChild(audLane);
                     
-                    // Audio 1〜3
                     for (let i = 0; i < 3; i++) {
                         buildSlot(audLane, "audio", i, "audio/*");
                     }
