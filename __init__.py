@@ -24,6 +24,8 @@ from .h3_pipe import ToH3Pipe, FromH3Pipe, FromH3MediaPipe
 from .hkmc_clip_prompt_dispatcher import HKMCClipPromptDispatcher
 from .hkmc_status_bomb import HKMCMasterBombSwitch, HKMCChildBombGate
 from .hkmc_stream_av_to_latent import HKMC_H3StreamLiveExtensionAVToLatent
+from .h3_design_director import H3DesignDirector
+
 
 NODE_CLASS_MAPPINGS = {
     "AnimaPromptDirector": AnimaPromptDirector,
@@ -45,6 +47,7 @@ NODE_CLASS_MAPPINGS = {
     "HKMCMasterBombSwitch": HKMCMasterBombSwitch,
     "HKMCChildBombGate": HKMCChildBombGate,
     "HKMC_H3StreamLiveExtensionAVToLatent": HKMC_H3StreamLiveExtensionAVToLatent,
+    "H3DesignDirector": H3DesignDirector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -67,6 +70,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HKMCMasterBombSwitch": "HKMC Master Switch (親)",
     "HKMCChildBombGate": "HKMC Child Bomb (子)",
     "HKMC_H3StreamLiveExtensionAVToLatent": "HKMC H3 Stream AV Extensions (with Latent Out)",
+    "H3DesignDirector": "H3 Design Director",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

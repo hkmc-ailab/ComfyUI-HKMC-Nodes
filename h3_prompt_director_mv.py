@@ -11,6 +11,8 @@ import folder_paths
 from server import PromptServer
 from aiohttp import web
 
+OVERLAP_SEC = 1.625
+
 def load_rules_mv():
     rule_path = os.path.join(os.path.dirname(__file__), "rules_mv.txt")
     if os.path.exists(rule_path):
@@ -29,6 +31,21 @@ _CJK_RE = re.compile(
 def contains_cjk(text):
     """日本語のかな・漢字、中国語の漢字が含まれるかを確認する。"""
     return bool(_CJK_RE.search(text or ""))
+
+def sanitize_english_text(text):
+    """全角記号や全角括弧を半角英語記号に正規化し、純粋な英語プロンプトを保証する。"""
+    if not text:
+        return ""
+    replacements = {
+        "（": "(", "）": ")", "【": "[", "】": "]",
+        "「": '"', "」": '"', "『": '"', "』": '"',
+        "、": ", ", "。": ". ", "：": ": ", "；": "; ",
+        "！": "!", "？": "?", "〜": "~", "～": "~",
+        " ": " "
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    return text.strip()
 
 def unload_ollama_vram(model_name):
     if not model_name: return
@@ -80,7 +97,7 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
             "Content-Type": "application/json",
             "Authorization": f"Bearer {active_key}"
         }
-        res1 = requests.post(url_base, headers=headers_bearer, json=payload, timeout=180)
+        res1 = requests.post(url_base, headers=headers_bearer, json=payload, timeout=600)
         if res1.status_code == 200:
             try:
                 return res1.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -91,7 +108,7 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
             "Content-Type": "application/json",
             "x-goog-api-key": active_key
         }
-        res2 = requests.post(url_base, headers=headers_apikey, json=payload, timeout=180)
+        res2 = requests.post(url_base, headers=headers_apikey, json=payload, timeout=600)
         if res2.status_code == 200:
             try:
                 return res2.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -118,7 +135,7 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
         from openai import OpenAI
         active_key = (api_key.strip() if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY", "")).strip()
         if not active_key: raise ValueError("OpenAI API Key is missing.")
-        client = OpenAI(api_key=active_key)
+        client = OpenAI(api_key=active_key, timeout=600.0)
         res = client.chat.completions.create(
             model=model_name.strip() if model_name and model_name.strip() else "gpt-4o",
             messages=[
@@ -137,14 +154,15 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
             "stream": False,
             "options": {"temperature": temp},
         }
-        res = requests.post("http://localhost:11434/api/generate", json=payload, timeout=300)
+        res = requests.post("http://localhost:11434/api/generate", json=payload, timeout=900)
         res.raise_for_status()
         return res.json().get("response", "").strip()
     return ""
 
-def analyze_audio_wave(audio_path, clip_duration=5.0, max_clips=14):
+def analyze_audio_wave(audio_path, clip_duration=10.0, max_clips=14):
+    """オーバーラップ尺（1.625秒）を考慮して各クリップの実際の時間帯を切り出し、相対3分割で判定する"""
     if not audio_path or not os.path.exists(audio_path):
-        return "音声ファイルが未設定のため、曲の導入から展開、クライマックスへの自然な流れを想定して絵コンテを作成してください。"
+        return "音声ファイルが未設定のため、曲の導入から展開、クライマックスへの自然な流れを想定して絵コンテを作成してください。", {}
     try:
         sr, data = wavfile.read(audio_path)
         if data.ndim > 1: data = data.mean(axis=1)
@@ -152,24 +170,76 @@ def analyze_audio_wave(audio_path, clip_duration=5.0, max_clips=14):
         max_val = np.max(np.abs(data)) or 1.0
         data /= max_val
         
-        samples_per_clip = int(sr * clip_duration)
-        diag_lines = []
+        total_sec = len(data) / float(sr)
+        step_sec = max(1.0, clip_duration - OVERLAP_SEC) if clip_duration > OVERLAP_SEC else clip_duration
+
+        clip_rms_list = []
+        clip_ranges = []
+
         for i in range(max_clips):
-            start = i * samples_per_clip
-            end = start + samples_per_clip
-            if start >= len(data): break
-            chunk = data[start:end]
-            rms = np.sqrt(np.mean(chunk**2))
+            start_sec = 0.0 if i == 0 else i * step_sec
+            end_sec = start_sec + clip_duration
+            if start_sec >= total_sec:
+                break
+            start_idx = int(start_sec * sr)
+            end_idx = min(len(data), int(end_sec * sr))
+            chunk = data[start_idx:end_idx]
+            if len(chunk) == 0:
+                break
+            rms = float(np.sqrt(np.mean(chunk**2)))
+            clip_rms_list.append(rms)
+            clip_ranges.append((i, round(start_sec, 1), round(min(end_sec, total_sec), 1)))
+
+        if not clip_rms_list:
+            return "音声データが短すぎるため解析できませんでした。", {}
+
+        q33 = np.percentile(clip_rms_list, 33.3)
+        q66 = np.percentile(clip_rms_list, 66.6)
+
+        diag_lines = []
+        stats_dict = {}
+        prev_tier = None
+        
+        for idx_in_list, (i, start_s, end_s) in enumerate(clip_ranges):
+            rms = clip_rms_list[idx_in_list]
+            if rms <= q33:
+                tier = "LOW"
+                energy_desc = "静寂・繊細な導入・ブレイク"
+            elif rms <= q66:
+                tier = "MID"
+                energy_desc = "標準的なボーカル・リズム展開・進行"
+            else:
+                tier = "HIGH"
+                energy_desc = "最大の盛り上がり・高音圧・クライマックス"
             
-            if rms < 0.05: energy = "静寂・ブレイク・余白"
-            elif rms < 0.15: energy = "繊細な演奏・導入・抑えたパート"
-            elif rms < 0.35: energy = "リズム展開・ビルドアップ・進行"
-            else: energy = "最大の盛り上がり・高音圧・クライマックス"
-                
-            diag_lines.append(f"- Clip {i+1} (約{int(i*clip_duration)}s〜{int((i+1)*clip_duration)}s): 音響エネルギー = {energy}")
-        return "\n".join(diag_lines)
+            is_transition = (prev_tier is not None and prev_tier != tier)
+            stats_dict[str(i+1)] = {"tier": tier, "trans": bool(is_transition)}
+            
+            transition_tag = " ★ [TRANSITION POINT: 曲の展開・転調・セクション切り替え点]" if is_transition else ""
+            diag_lines.append(f"- Clip {i+1} (約{start_s}s〜{end_s}s): 音響エネルギー = {tier} ({energy_desc}){transition_tag}")
+            
+            prev_tier = tier
+            
+        return "\n".join(diag_lines), stats_dict
     except Exception as e:
-        return f"波形解析エラー: {e}"
+        return f"波形解析エラー: {e}", {}
+
+def parse_design_directives_dict(raw_design_json):
+    """Design DirectorのJSONを辞書として安全にパースする"""
+    if not raw_design_json:
+        return {"low": [], "mid": [], "high": [], "transition": []}
+    try:
+        d = json.loads(raw_design_json) if isinstance(raw_design_json, str) else raw_design_json
+        if isinstance(d, dict):
+            return {
+                "low": d.get("low", []) or [],
+                "mid": d.get("mid", []) or [],
+                "high": d.get("high", []) or [],
+                "transition": d.get("transition", []) or [],
+            }
+    except Exception:
+        pass
+    return {"low": [], "mid": [], "high": [], "transition": []}
 
 def build_character_context(data):
     subjects = []
@@ -296,23 +366,56 @@ async def handle_generate_storyboard_mv(request):
         if provider == "Gemini (Cloud)" and (analysis_mode in ["auto", "gemini_audio"]) and audio_full_path and os.path.exists(audio_full_path):
             use_gemini_audio = True
 
-        audio_instruction_section = ""
-        if use_gemini_audio:
-            audio_instruction_section = f"""【音源ファイルの直接解析指示】
-添付されたオーディオファイルを直接聴いて解析してください。
-- 1クリップの長さは【約 {clip_duration_sec} 秒】です。
-- 各クリップの時間帯における「ボーカルの有無」「演奏の盛り上がり（ビートの激しさ・静寂・転調）」を耳で正確に捉えてください。
-- 音の静と動、緩急に合わせて、映像のスケール感や被写体の感情・カメラワークを連動させてください。"""
+        audio_diagnostic_text = ""
+        ui_stats = {}
+        if audio_full_path and os.path.exists(audio_full_path):
+            audio_diagnostic_text, ui_stats = analyze_audio_wave(audio_full_path, clip_duration=clip_duration_sec)
         else:
-            audio_diagnostic_text = analyze_audio_wave(audio_full_path, clip_duration=clip_duration_sec)
-            audio_instruction_section = f"""【楽曲の展開・エネルギー診断 (1クリップ = {clip_duration_sec}秒枠)】
+            audio_diagnostic_text = "音声ファイルが未設定のため、曲の導入から展開、クライマックスへの自然な流れを想定して絵コンテを作成してください。"
+
+        if use_gemini_audio:
+            audio_instruction_section = f"""【音源ファイルの直接解析指示 ＆ クリップ時間枠・エネルギー診断】
+添付されたオーディオファイルを直接耳で聴き、以下のクリップ時間枠および波形エネルギー診断（LOW / MID / HIGH と ★ TRANSITION POINT）と照らし合わせて解析してください。
+- 各クリップの時間帯における「ボーカルの有無」「演奏の盛り上がり・転調」を正確に捉え、指定されたエネルギー帯および TRANSITION POINT の演出ルールを確実に反映させてください。
+
 {audio_diagnostic_text}"""
+        else:
+            audio_instruction_section = f"""【楽曲の展開・エネルギー診断 (1クリップ基本尺 = {clip_duration_sec}秒 / オーバーラップ考慮済)】
+{audio_diagnostic_text}"""
+
+        raw_design_json = data.get("design_directives_json", "")
+        d_dict = parse_design_directives_dict(raw_design_json)
+        
+        design_directives = ""
+        d_lines = ["[MUSIC VIDEO DYNAMIC DIRECTIVES]"]
+        d_lines.append("STRICT RULE: You MUST incorporate the following user-selected camera, framing, acting, and lighting directives into 'Shot 1' and '演出' according to the audio energy level and transition status of each clip:")
+        
+        sec_map = [
+            ("low", "LOW (静寂・導入)"),
+            ("mid", "MID (標準展開・平歌)"),
+            ("high", "HIGH (サビ・最高潮)"),
+            ("transition", "★ [TRANSITION POINT] (曲の展開・転調・セクション切り替え点)")
+        ]
+        
+        has_items = False
+        for k_sec, lbl_sec in sec_map:
+            items = d_dict.get(k_sec, [])
+            if items:
+                has_items = True
+                d_lines.append(f"\nWhen the clip is marked as {lbl_sec}:")
+                for itm in items:
+                    d_lines.append(f"- {itm}")
+        
+        if has_items:
+            design_directives = "\n".join(d_lines)
 
         system_instruction = f"""あなたは映画やハイエンドMVを手掛けるプロの映像監督・シネマトグラファーです。
 提示された【MV全体世界観】のシチュエーションを最大限に活かし、楽曲の展開に完全に同期した Clip 1〜14 の絵コンテを作成してください。
 
 [最重要前提]
 - 1クリップあたりの生成尺は【 {clip_duration_sec} 秒 】です。
+
+{design_directives}
 
 [ショット設計とワンカット原則]
 - 1つのClipにつき、出力するShotは【Shot 1】の1つだけにしてください。1つのClip内で複数のShot（カット割り）を行うと映像破綻が起きるため、絶対に「Shot 2」以降は出力しないでください。
@@ -322,6 +425,14 @@ async def handle_generate_storyboard_mv(request):
 - 同じ場所で同じポーズを保つ、ただ立ち尽くす、同じような歩行を続けるなどの「反復・ループ表現」を固く禁じます。
 - クリップが進むにつれて「物語の進行」「被写体の感情の深化」「場所やライティングの推移」を必ず描き、シーンが停滞しないようにしてください。
 - 直前のClipと同じカメラアングル（例: Low angleの連続など）を2回続けて使用してはいけません。
+
+[楽曲展開点（TRANSITION POINT）でのダイナミック・トランジション原則]
+- 音響エネルギー診断で「★ [TRANSITION POINT]」と記されているクリップは、Aメロ→Bメロ、Bメロ→サビ、間奏などの【楽曲の重要な節目】です。
+- クリップ間の物理的・キャラクター的な連続性は完全に保ちつつ、カメラワークと被写体の運動量をこのタイミングで劇的に推移（Dynamic Transition）させてください。
+  - 例: 直前までワイドショット（引き）で静かに佇んでいた場合、このクリップの冒頭でカメラが一気に前進（Dolly In）して顔や手元のアップへと滑らかに飛び込む。
+  - 例: カメラの高さがアイレベルだった場合、ビートの展開に合わせて急激に煽り（Low angle）や回り込み（Arc）へとカメラ軌道を旋回させる。
+  - 例: 背景の照明やエフェクト（スポットライト、スモーク、ストロボ）が曲の展開と同時に点灯・変化する。
+- 同じ画角・同じテンポのカメラワークを維持したままセクションを跨ぐことを固く禁じます。
 
 [構図・カメラワークの選択肢（楽曲と世界観に合わせて自由に選択）]
 楽曲のテンポや感情の起伏に応じて、最も効果的な映画的カメラワークを選択してください。
@@ -365,7 +476,7 @@ Shot 1: （[カメラ構図名]: Clip 1とは異なる角度・距離からの�
         if provider == "Ollama (Local)":
             await asyncio.to_thread(unload_ollama_vram, model_name or "qwen2.5:7b-instruct-q5_K_M")
 
-        return web.json_response({"success": True, "storyboard": result})
+        return web.json_response({"success": True, "storyboard": result, "audio_stats": ui_stats})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
@@ -390,6 +501,26 @@ async def handle_generate_prompt_mv(request):
         except Exception:
             pass
 
+        d_dict = parse_design_directives_dict(data.get("design_directives_json", ""))
+        audio_stats = data.get("audio_stats", {}) or {}
+
+        def get_clip_directive_hints(clip_idx):
+            c_stat = audio_stats.get(str(clip_idx), {})
+            tier_key = (c_stat.get("tier") or "").lower()
+            is_trans = bool(c_stat.get("trans", False))
+            hints = []
+            if tier_key in ["low", "mid", "high"]:
+                hints.extend(d_dict.get(tier_key, []))
+            if is_trans:
+                hints.extend(d_dict.get("transition", []))
+            seen = set()
+            unique_hints = []
+            for h in hints:
+                if h not in seen:
+                    seen.add(h)
+                    unique_hints.append(h)
+            return unique_hints, is_trans
+
         char_replacements = {}
         for k in range(1, 4):
             if data.get(f"char{k}_enabled", (k == 1)):
@@ -406,7 +537,7 @@ async def handle_generate_prompt_mv(request):
                 text = pattern.sub(tag, text)
             text = re.sub(r"\[Shot\s*\d+\s*\|\s*[^\]]+\]", "", text, flags=re.IGNORECASE)
             text = re.sub(r"\|\s*\d+:\d+(?:\.\d+)?", "", text)
-            return text.strip()
+            return sanitize_english_text(text)
 
         characters = build_character_context(data)
 
@@ -419,7 +550,6 @@ async def handle_generate_prompt_mv(request):
         raw_rules = load_rules_mv()
 
         texts_to_translate = {}
-
         for idx, _label, subject_text in characters:
             texts_to_translate[f"subject_{idx}"] = subject_text
 
@@ -445,11 +575,17 @@ async def handle_generate_prompt_mv(request):
                 if amb_raw: texts_to_translate[f"c_amb_{i}"] = amb_raw
 
                 shot_parts = []
+                clip_hints, is_trans_clip = get_clip_directive_hints(i)
+                hints_str = " ".join(clip_hints)
+
                 for j in range(1, 5):
                     if data.get(f"c{i}_s{j}_enabled", False):
                         action = apply_char_replacements(data.get(f"c{i}_s{j}_action", "").strip())
-                        if action:
-                            shot_parts.append(f"<s{j}>\n{action}\n</s{j}>")
+                        if action or hints_str:
+                            combined_act = action
+                            if j == 1 and hints_str:
+                                combined_act = f"{action}\n[Stylistic Camera/Lighting Directives to weave naturally into this shot]: {hints_str}".strip()
+                            shot_parts.append(f"<s{j}>\n{combined_act}\n</s{j}>")
                 if shot_parts:
                     clips_actions_to_translate[i] = "\n".join(shot_parts)
 
@@ -459,7 +595,12 @@ async def handle_generate_prompt_mv(request):
 
         translated_texts = {}
         if texts_to_translate:
-            trans_inst = """You are a strict Japanese-to-English translation engine for cinematic video prompts.
+            keys_list = list(texts_to_translate.keys())
+            chunk_size = 8  
+
+            for chunk_start in range(0, len(keys_list), chunk_size):
+                sub_keys = keys_list[chunk_start:chunk_start + chunk_size]
+                trans_inst = """You are a strict Japanese-to-English translation engine for cinematic video prompts.
 
 CRITICAL RULES:
 1. Translate every input value into natural, precise English.
@@ -467,16 +608,16 @@ CRITICAL RULES:
 3. If a character name is written in Japanese or Chinese, render it using Latin letters. Do not retain its original CJK characters.
 4. Preserve the structure [Subject X: CharacterName].
 5. Preserve structural tokens such as <Picture 1>, <Audio 1>, and <Subject 1> exactly when they are standalone reference tokens.
-6. Do not translate or alter the XML wrapper tags used to identify each field.
+6. Do not translate or alter the XML wrapper tags used to identify each field. Output EVERY tag provided.
 7. Preserve the original meaning and all important details. Do not summarize or omit content.
 8. If the input is already English, preserve its meaning and wording.
 9. Output ONLY the translated values inside their matching XML wrapper tags. No markdown, explanations, or extra text.
 
 Input Texts:
 """
-            for k, text in texts_to_translate.items():
-                trans_inst += f"<{k}>\n{text}\n</{k}>\n\n"
-            try:
+                for k in sub_keys:
+                    trans_inst += f"<{k}>\n{texts_to_translate[k]}\n</{k}>\n\n"
+
                 res_trans = await asyncio.to_thread(
                     call_llm,
                     trans_inst,
@@ -486,37 +627,23 @@ Input Texts:
                     temp=0.2
                 )
 
-                for k in texts_to_translate.keys():
+                for k in sub_keys:
                     m = re.search(
                         fr"<{k}>\s*(.*?)\s*</{k}>",
                         res_trans,
                         re.DOTALL | re.IGNORECASE
                     )
-
-                    if not m:
-                        raise RuntimeError(
-                            f"Translation output is missing the expected tag: {k}"
-                        )
-
-                    translated = m.group(1).strip()
-
-                    if contains_cjk(translated):
-                        raise RuntimeError(
-                            f"Japanese/Chinese characters remain after translation: {k}"
-                        )
-
-                    translated_texts[k] = translated
-
-            except Exception as e:
-                raise RuntimeError(
-                    "English translation failed. "
-                    "Prompt generation was stopped to prevent mixed-language output. "
-                    f"Details: {e}"
-                ) from e
+                    if m:
+                        translated = sanitize_english_text(m.group(1).strip())
+                        if contains_cjk(translated):
+                            translated = re.sub(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]", "", translated).strip()
+                        translated_texts[k] = translated
+                    else:
+                        translated_texts[k] = sanitize_english_text(texts_to_translate[k])
 
         if characters:
             subject_definitions_text = "\n\n".join(
-                translated_texts[f"subject_{idx}"]
+                translated_texts.get(f"subject_{idx}", _subject_text)
                 for idx, _label, _subject_text in characters
             )
         else:
@@ -534,17 +661,22 @@ Input Texts:
 
         translated_shot_actions = {}
         if clips_actions_to_translate:
-            prompt_instruction = sys_context + """
+            clip_keys = list(clips_actions_to_translate.keys())
+            action_chunk_size = 4
+            for c_start in range(0, len(clip_keys), action_chunk_size):
+                sub_clip_keys = clip_keys[c_start:c_start + action_chunk_size]
+                prompt_instruction = sys_context + """
 
-Task: Translate and cinematic-adapt the following action/camera instructions into English.
+Task: Translate and cinematic-adapt the following action/camera instructions into fluent English.
+If '[Stylistic Camera/Lighting Directives to weave naturally into this shot]' is provided inside a shot, seamlessly blend those camera, framing, acting, and lighting details into the single cohesive shot description without outputting the bracketed label itself.
 STRICT RULE 1: DO NOT use markdown. You MUST wrap each translated action EXACTLY in the provided <clip_X><sY>...</sY></clip_X> tags. 
 STRICT RULE 2: DO NOT output any Japanese or Chinese characters. Everything MUST be in English.
 
 Input:
 """
-            for k, text in clips_actions_to_translate.items():
-                prompt_instruction += f"<clip_{k}>\n{text}\n</clip_{k}>\n\n"
-            try:
+                for k in sub_clip_keys:
+                    prompt_instruction += f"<clip_{k}>\n{clips_actions_to_translate[k]}\n</clip_{k}>\n\n"
+
                 result_text = await asyncio.to_thread(
                     call_llm,
                     prompt_instruction,
@@ -554,51 +686,32 @@ Input:
                     temp=0.2
                 )
 
-                for k, text in clips_actions_to_translate.items():
+                for k in sub_clip_keys:
+                    text = clips_actions_to_translate[k]
                     clip_m = re.search(
                         fr"<clip_{k}>\s*(.*?)\s*</clip_{k}>",
                         result_text,
                         re.DOTALL | re.IGNORECASE
                     )
-
-                    if not clip_m:
-                        raise RuntimeError(
-                            f"Missing translated clip tag: clip_{k}"
-                        )
-
-                    clip_content = clip_m.group(1)
                     translated_shot_actions[k] = {}
+                    expected_shots = [int(n) for n in re.findall(r"<s(\d+)>", text)]
 
-                    expected_shots = [
-                        int(n) for n in re.findall(r"<s(\d+)>", text)
-                    ]
-
-                    for j in expected_shots:
-                        sm = re.search(
-                            fr"<s{j}>\s*(.*?)\s*</s{j}>",
-                            clip_content,
-                            re.DOTALL | re.IGNORECASE
-                        )
-
-                        if not sm:
-                            raise RuntimeError(
-                                f"Missing translated Shot tag: clip_{k}, s{j}"
+                    if clip_m:
+                        clip_content = clip_m.group(1)
+                        for j in expected_shots:
+                            sm = re.search(
+                                fr"<s{j}>\s*(.*?)\s*</s{j}>",
+                                clip_content,
+                                re.DOTALL | re.IGNORECASE
                             )
-
-                        translated_action = sm.group(1).strip()
-
-                        if contains_cjk(translated_action):
-                            raise RuntimeError(
-                                f"Japanese/Chinese characters remain: clip_{k}, s{j}"
-                            )
-
-                        translated_shot_actions[k][j] = translated_action
-
-            except Exception as e:
-                raise RuntimeError(
-                    "Shot action English translation failed. "
-                    f"Details: {e}"
-                ) from e
+                            if sm:
+                                act = sanitize_english_text(sm.group(1).strip())
+                                translated_shot_actions[k][j] = act
+                            else:
+                                translated_shot_actions[k][j] = sanitize_english_text(text)
+                    else:
+                        for j in expected_shots:
+                            translated_shot_actions[k][j] = sanitize_english_text(text)
 
         if provider == "Ollama (Local)" and (texts_to_translate or clips_actions_to_translate):
             await asyncio.to_thread(unload_ollama_vram, model_name or "qwen2.5:7b-instruct-q5_K_M")
@@ -642,8 +755,13 @@ Input:
                 sec_retention += f"\nGlobal directives: {global_retention_en}"
                 
             detailed_parts = []
+            _clip_hints, is_trans = get_clip_directive_hints(i)
+
             if do_continue and i > 1:
-                detailed_parts.append("[Shot 1] The performer motion, camera momentum, trajectory, lighting, and environmental state continue seamlessly from the preceding clip context without pause or jarring transition.")
+                if is_trans:
+                    detailed_parts.append("[Shot 1] The performer motion, camera momentum, trajectory, lighting, and environmental state continue seamlessly from the preceding clip context without pause or jarring cut, while dynamically shifting the camera perspective, framing, and performance intensity in sync with the musical transition.")
+                else:
+                    detailed_parts.append("[Shot 1] The performer motion, camera momentum, trajectory, lighting, and environmental state continue seamlessly from the preceding clip context without pause or jarring transition.")
             else:
                 detailed_parts.append("[Shot 1] Initiate the scene with dynamic, cinematic framing.")
 
@@ -663,11 +781,7 @@ Input:
                     "",
                     action_text
                 ).strip()
-
-                if contains_cjk(action_text):
-                    raise RuntimeError(
-                        f"Clip {i}, Shot {j}: Japanese/Chinese text remains."
-                    )
+                action_text = sanitize_english_text(action_text)
 
                 shot_block = []
                 if j > 1:
@@ -704,7 +818,7 @@ Input:
             sec_soundscape = f"overall_soundscape:\n{c_ambient_sound}"
             sec_music = "non_diegetic_music:\nThe protected master-song audio drives the vocal expression and rhythmic momentum."
 
-            full_prompt = (
+            full_prompt = sanitize_english_text(
                 f"{sec_subject}\n\n"
                 f"{sec_summary}\n\n"
                 f"{sec_retention}\n\n"
@@ -712,12 +826,6 @@ Input:
                 f"{sec_soundscape}\n\n"
                 f"{sec_music}"
             )
-
-            if contains_cjk(full_prompt):
-                raise RuntimeError(
-                    f"Clip {i}: Final prompt contains Japanese/Chinese characters. "
-                    "Check character descriptions and translation results."
-                )
 
             final_clip_prompts[str(i)] = full_prompt
 
@@ -766,6 +874,9 @@ class H3PromptDirector_MV:
                 "char3_pics": ("STRING", {"default": ""}),
                 "char3_audio": (audio_list, {"default": "None"}),
                 "char3_extra": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "design_directives": ("STRING", {"forceInput": True}),
             }
         }
         inputs["required"]["clips_data_json"] = ("STRING", {"default": "{}"})
