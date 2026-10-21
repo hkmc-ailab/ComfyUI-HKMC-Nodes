@@ -1,3 +1,4 @@
+# h3_prompt_director_mv_20.py
 import os
 import re
 import json
@@ -29,11 +30,9 @@ _CJK_RE = re.compile(
 )
 
 def contains_cjk(text):
-    """日本語のかな・漢字、中国語の漢字が含まれるかを確認する。"""
     return bool(_CJK_RE.search(text or ""))
 
 def sanitize_english_text(text):
-    """全角記号や全角括弧を半角英語記号に正規化し、純粋な英語プロンプトを保証する。"""
     if not text:
         return ""
     replacements = {
@@ -160,7 +159,6 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
     return ""
 
 def analyze_audio_wave(audio_path, clip_duration=10.0, max_clips=14):
-    """オーバーラップ尺（1.625秒）を考慮して各クリップの実際の時間帯を切り出し、相対3分割で判定する"""
     if not audio_path or not os.path.exists(audio_path):
         return "音声ファイルが未設定のため、曲の導入から展開、クライマックスへの自然な流れを想定して絵コンテを作成してください。", {}
     try:
@@ -225,7 +223,6 @@ def analyze_audio_wave(audio_path, clip_duration=10.0, max_clips=14):
         return f"波形解析エラー: {e}", {}
 
 def parse_design_directives_dict(raw_design_json):
-    """Design DirectorのJSONを辞書として安全にパースする"""
     if not raw_design_json:
         return {"low": [], "mid": [], "high": [], "transition": []}
     try:
@@ -566,6 +563,9 @@ async def handle_generate_prompt_mv(request):
                 continue
 
             if data.get(f"c{i}_enabled", False):
+                if data.get(f"c{i}_locked", False):
+                    continue
+
                 sum_raw = apply_char_replacements(data.get(f"c{i}_summary", "").strip())
                 ret_raw = apply_char_replacements(data.get(f"c{i}_retention", "").strip())
                 amb_raw = apply_char_replacements(data.get(f"c{i}_ambient_sound", "").strip())
@@ -725,6 +725,9 @@ Input:
                 continue
 
             if not data.get(f"c{i}_enabled", False):
+                continue
+                
+            if data.get(f"c{i}_locked", False):
                 continue
                 
             do_continue = data.get(f"c{i}_continue", (i > 1))
