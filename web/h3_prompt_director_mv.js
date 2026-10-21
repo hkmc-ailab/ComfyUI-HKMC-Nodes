@@ -1,3 +1,4 @@
+// h3_prompt_director_mv_19.js
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
@@ -75,7 +76,7 @@ function installStudioStyles() {
         .h3-clip-results-container::-webkit-scrollbar { width: 6px; }
         .h3-clip-results-container::-webkit-scrollbar-thumb { background: #383838; border-radius: 3px; }
         .h3-clip-result-title { font-size: 11px; font-weight: bold; color: #ffffff; margin-top: 4px; flex-shrink: 0; }
-        .h3-clip-result-textarea { width: 100%; min-height: 120px; background: #181818; border: 1px solid #383838; border-radius: 8px; color: #dbe0e6; font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.45; padding: 8px; box-sizing: border-box; resize: vertical; outline: none; flex-shrink: 0; }
+        .h3-clip-result-textarea { width: 100%; min-height: 120px; background: #181818; border: 1px solid #383838; border-radius: 8px; color: #dbe0e6; font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.45; padding: 8px; box-sizing: border-box; resize: vertical; outline: none; flex-shrink: 0; transition: opacity 0.2s; }
         .h3-clip-result-textarea:focus { border-color: #6e7681; }
     `;
     document.head.appendChild(style);
@@ -444,6 +445,7 @@ app.registerExtension({
                     if (!text || !text.trim()) return;
                     
                     for (let i = 1; i <= 14; i++) {
+                        if (getV(`c${i}_locked`, false)) continue; // ★ ロック保護
                         setV(`c${i}_enabled`, false);
                         for (let j = 1; j <= 4; j++) {
                             setV(`c${i}_s${j}_enabled`, false);
@@ -458,6 +460,7 @@ app.registerExtension({
                         const clipNum = parseInt(clipBlocks[idx]);
                         const blockContent = clipBlocks[idx + 1] || "";
                         if (clipNum < 1 || clipNum > 14) continue;
+                        if (getV(`c${clipNum}_locked`, false)) continue; // ★ ロック保護
 
                         setV(`c${clipNum}_enabled`, true);
 
@@ -480,7 +483,7 @@ app.registerExtension({
                         }
                     }
                     saveClipData();
-                    alert("全体構成をクリップ 1〜14 に反映しました！\n※必ず「クリップ」タブを開き、歌うシーンの「口パク (歌唱)」を手動でONにしてください。");
+                    alert("全体構成をクリップ 1〜14 に反映しました！\n※必ず「クリップ」タブを開き、歌うシーンの「口パク (歌唱)」を手動でONにしてください。\n(ロックされているクリップは上書き保護されました)");
                 };
 
                 const renderTabContent = () => {
@@ -670,6 +673,10 @@ app.registerExtension({
                                     indicator = "🟢";
                                 }
                             }
+                            // ★ ロック状態をクリップボタンに表示
+                            if (getV(`c${i}_locked`, false)) {
+                                indicator += "🔒";
+                            }
                             
                             const btn = document.createElement("div");
                             btn.innerHTML = `<span style="font-size:8px; margin-right:4px; pointer-events:none;">${indicator}</span>C${i}`;
@@ -688,15 +695,39 @@ app.registerExtension({
                         titleBar.style.cssText = "display:flex; align-items:center; gap:12px; margin-bottom:8px; flex-wrap:wrap;";
                         const title = document.createElement("div"); title.className = "h3-char-title"; title.textContent = `クリップ ${activeClipTab}`;
                         
+                        // ★ ロックチェックボックスを追加
+                        const lockLabel = document.createElement("label");
+                        lockLabel.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
+                        const lockChk = document.createElement("input");
+                        lockChk.type = "checkbox";
+                        lockChk.checked = getV(`c${activeClipTab}_locked`, false);
+                        lockLabel.append(lockChk, document.createTextNode("🔒 プロンプトをロック"));
+
+                        lockChk.onchange = () => {
+                            setV(`c${activeClipTab}_locked`, lockChk.checked);
+                            renderTabContent();
+                        };
+                        
                         titleBar.append(
                             title, 
+                            lockLabel,
                             bindVCheck(`c${activeClipTab}_enabled`, "このクリップを有効にする", activeClipTab === 1, () => { renderTabContent(); }), 
                             bindVCheck(`c${activeClipTab}_continue`, "前回の動画の続きを生成する", true), 
                             bindVCheck(`c${activeClipTab}_link_next`, "今回の動画を次に繋げる", false)
                         );
                         activeClipCard.appendChild(titleBar);
 
-                        activeClipCard.append(
+                        const editorContainer = document.createElement("div");
+                        editorContainer.style.display = "flex";
+                        editorContainer.style.flexDirection = "column";
+
+                        // ★ ロックされている場合は半透明にして無効化
+                        if (getV(`c${activeClipTab}_locked`, false)) {
+                            editorContainer.style.opacity = "0.4";
+                            editorContainer.style.pointerEvents = "none";
+                        }
+
+                        editorContainer.append(
                             bindVInput(`c${activeClipTab}_summary`, "演出（summary）", true, "このクリップの全体的な演出・シチュエーション・展開を入力（LLMがsummary:へ英語翻訳します）"),
                             bindVInput(`c${activeClipTab}_retention`, "保持要素 (retention_analysis)", true, "このクリップ特有の保持要素や維持したいディテールを入力（LLMが英語翻訳します）"),
                             bindVInput(`c${activeClipTab}_ambient_sound`, "環境音 (Foley)", false, "足音、風の音、雨音などの環境音・効果音を入力")
@@ -718,7 +749,7 @@ app.registerExtension({
                             };
                             chip.append(chk, span); shotToggleBar.appendChild(chip);
                         }
-                        activeClipCard.appendChild(shotToggleBar);
+                        editorContainer.appendChild(shotToggleBar);
 
                         for (let j = 1; j <= 4; j++) {
                             if (!getV(`c${activeClipTab}_s${j}_enabled`, j === 1)) continue;
@@ -730,8 +761,9 @@ app.registerExtension({
                                 bindVInput(`c${activeClipTab}_s${j}_action`, "アクション / 構図", true, `ショット${j}のアクション・カメラワークを入力`), 
                                 bindVCastSingSelector(`c${activeClipTab}_s${j}`)
                             );
-                            activeClipCard.appendChild(card);
+                            editorContainer.appendChild(card);
                         }
+                        activeClipCard.appendChild(editorContainer);
                         contentArea.appendChild(activeClipCard);
 
                     } else if (activeTab === "llm") {
@@ -748,7 +780,7 @@ app.registerExtension({
                         
                         contentArea.append(titlePrompt, buildPlanGuideBanner("guide-banner-prompt"));
 
-                        const genBtn = document.createElement("button"); genBtn.className = "h3-btn-gen-prompt"; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳</span>`;
+                        const genBtn = document.createElement("button"); genBtn.className = "h3-btn-gen-prompt"; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳 (ロック中クリップは除外)</span>`;
                         const clipResContainer = document.createElement("div"); clipResContainer.className = "h3-clip-results-container";
 
                         const genClipWidget = wMap["generated_clip_prompts"];
@@ -763,24 +795,61 @@ app.registerExtension({
                                     const headerBar = document.createElement("div");
                                     headerBar.style.cssText = "display:flex; justify-content:space-between; align-items:flex-end; margin-top:4px;";
                                     
+                                    const titleBlock = document.createElement("div");
+                                    titleBlock.style.cssText = "display:flex; align-items:center; gap:12px;";
+
                                     const t = document.createElement("div"); 
                                     t.className = "h3-clip-result-title"; 
                                     t.style.marginTop = "0";
-                                    t.textContent = `クリップ ${i} プロンプト (直接編集可能)`;
-                                    
+                                    t.textContent = `クリップ ${i} プロンプト`;
+
+                                    // ★ ロックチェックボックスを追加
+                                    const lockLabel = document.createElement("label");
+                                    lockLabel.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
+                                    const lockChk = document.createElement("input");
+                                    lockChk.type = "checkbox";
+                                    lockChk.checked = getV(`c${i}_locked`, false);
+                                    lockLabel.append(lockChk, document.createTextNode("🔒 ロック"));
+
+                                    titleBlock.append(t, lockLabel);
+
                                     const singleBtn = document.createElement("button");
-                                    singleBtn.textContent = "［このクリップのみを構築・翻訳］";
+                                    singleBtn.textContent = "［このクリップのみ構築・翻訳］";
                                     singleBtn.title = `クリップ${i}のみをLLMに翻訳させます`;
                                     singleBtn.style.cssText = "background:#1e2430; border:1px solid #324765; color:#5bb3f5; font-size:10px; font-weight:bold; padding:3px 8px; border-radius:4px; cursor:pointer; transition:all 0.1s;";
                                     singleBtn.onmouseenter = () => { singleBtn.style.background = "#2b3446"; };
                                     singleBtn.onmouseleave = () => { singleBtn.style.background = "#1e2430"; };
 
-                                    headerBar.append(t, singleBtn);
+                                    headerBar.append(titleBlock, singleBtn);
 
                                     const cta = document.createElement("textarea"); 
                                     cta.className = "h3-clip-result-textarea"; 
                                     cta.value = clipData[i] || "";
                                     
+                                    const applyLockState = () => {
+                                        if (lockChk.checked) {
+                                            cta.readOnly = true;
+                                            cta.style.opacity = "0.5";
+                                            cta.style.pointerEvents = "none";
+                                            singleBtn.style.display = "none";
+                                            t.textContent = `クリップ ${i} プロンプト (🔒 ロック中)`;
+                                            t.style.color = "#8b949e";
+                                        } else {
+                                            cta.readOnly = false;
+                                            cta.style.opacity = "1";
+                                            cta.style.pointerEvents = "auto";
+                                            singleBtn.style.display = "block";
+                                            t.textContent = `クリップ ${i} プロンプト (直接編集可能)`;
+                                            t.style.color = "#ffffff";
+                                        }
+                                    };
+                                    applyLockState();
+
+                                    lockChk.onchange = () => {
+                                        setV(`c${i}_locked`, lockChk.checked);
+                                        applyLockState();
+                                    };
+
                                     cta.oninput = () => { 
                                         try { 
                                             const current = JSON.parse(genClipWidget.value || "{}"); 
@@ -796,7 +865,7 @@ app.registerExtension({
                                         
                                         const payload = { 
                                             target_clip: i,
-                                            design_directives_json: getConnectedDirectivesJson() // ★ 追加
+                                            design_directives_json: getConnectedDirectivesJson()
                                         };
                                         node.widgets.forEach(w => { payload[w.name] = w.value; });
                                         try {
@@ -804,6 +873,10 @@ app.registerExtension({
                                             Object.assign(payload, parsed);
                                         } catch(e) {}
                                         
+                                        // 送信前に一時的にロックを解除（明示的な「このクリップのみ構築」ボタンはロックをバイパスして上書きするため）
+                                        const originalLock = payload[`c${i}_locked`];
+                                        payload[`c${i}_locked`] = false;
+
                                         try {
                                             const controller = new AbortController();
                                             const timeoutId = setTimeout(() => controller.abort(), 600000);
@@ -827,7 +900,9 @@ app.registerExtension({
                                             alert("通信エラー: " + err.message); 
                                         } finally { 
                                             singleBtn.disabled = false; 
-                                            singleBtn.textContent = "［このクリップのみを構築・翻訳］"; 
+                                            singleBtn.textContent = "［このクリップのみ構築・翻訳］"; 
+                                            // ロック状態を元に戻す
+                                            if (originalLock) setV(`c${i}_locked`, true);
                                         }
                                     };
 
@@ -841,7 +916,7 @@ app.registerExtension({
                         genBtn.onclick = async () => {
                             genBtn.disabled = true; genBtn.innerHTML = `<span>⏳ プロンプト構築中... (LLM通信中)</span>`;
                             const payload = {
-                                design_directives_json: getConnectedDirectivesJson() // ★ 追加
+                                design_directives_json: getConnectedDirectivesJson()
                             };
                             node.widgets.forEach(w => { payload[w.name] = w.value; });
                             try {
@@ -865,13 +940,13 @@ app.registerExtension({
                                 if (data.success && data.clip_prompts) {
                                     let current = {};
                                     try { current = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
-                                    Object.assign(current, data.clip_prompts);
+                                    Object.assign(current, data.clip_prompts); // ロックされたクリップはレスポンスに含まれないため、既存の current はそのまま維持される
                                     const strData = JSON.stringify(current);
                                     if (genClipWidget) { genClipWidget.value = strData; if (genClipWidget.callback) genClipWidget.callback(strData); }
                                     updateClipResultsUI();
                                 } else { alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); }
                             } catch (err) { alert("通信エラー: " + err.message); } 
-                            finally { genBtn.disabled = false; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳</span>`; }
+                            finally { genBtn.disabled = false; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳 (ロック中クリップは除外)</span>`; }
                         };
                         
                         contentArea.append(genBtn, clipResContainer);
