@@ -1,6 +1,76 @@
-// h3_prompt_director_mv_19.js
+// h3_prompt_director_mv.js
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+
+if (!window._h3_queue_hooked) {
+    window._h3_queue_hooked = true;
+    const origToPrompt = app.graphToPrompt;
+    app.graphToPrompt = async function () {
+        const res = await origToPrompt.apply(this, arguments);
+        const p = res.output;
+        let needsUiUpdate = false;
+
+        for (const [id, node] of Object.entries(p)) {
+            if (node.class_type === "H3PromptDirector_MV") {
+                let jsonStr = node.inputs["clips_data_json"];
+                if (jsonStr) {
+                    try {
+                        let data = JSON.parse(jsonStr);
+                        if (!data.cache_settings) data.cache_settings = {};
+                        
+                        let hasChanged = false;
+                        for (let i = 1; i <= 14; i++) {
+                            if (!data.cache_settings[i]) continue;
+                            
+                            if (data.cache_settings[i].seed === -1) {
+                                let newSeed = Math.floor(Math.random() * 1125899906842624) + 1;
+                                data.cache_settings[i].seed = newSeed;
+                                data.cache_settings[i].last_seed = newSeed;
+                                hasChanged = true;
+                                
+                                const gNode = app.graph.getNodeById(Number(id));
+                                if (gNode) {
+                                    const w = gNode.widgets.find(w => w.name === "clips_data_json");
+                                    if (w) {
+                                        let wData = JSON.parse(w.value);
+                                        if (!wData.cache_settings) wData.cache_settings = {};
+                                        if (!wData.cache_settings[i]) wData.cache_settings[i] = { seed: -1, save_latent: false };
+                                        wData.cache_settings[i].last_seed = newSeed;
+                                        w.value = JSON.stringify(wData);
+                                        needsUiUpdate = true;
+                                    }
+                                }
+                            } else {
+                                data.cache_settings[i].last_seed = data.cache_settings[i].seed;
+                                const gNode = app.graph.getNodeById(Number(id));
+                                if (gNode) {
+                                    const w = gNode.widgets.find(w => w.name === "clips_data_json");
+                                    if (w) {
+                                        let wData = JSON.parse(w.value);
+                                        if (!wData.cache_settings) wData.cache_settings = {};
+                                        if (!wData.cache_settings[i]) wData.cache_settings[i] = { seed: -1, save_latent: false };
+                                        wData.cache_settings[i].last_seed = data.cache_settings[i].seed;
+                                        w.value = JSON.stringify(wData);
+                                        needsUiUpdate = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (hasChanged) {
+                            node.inputs["clips_data_json"] = JSON.stringify(data);
+                        }
+                    } catch(e) { console.error(e); }
+                }
+            }
+        }
+        
+        if (needsUiUpdate) {
+            document.dispatchEvent(new CustomEvent("h3_seeds_updated"));
+        }
+        
+        return res;
+    };
+}
 
 function installStudioStyles() {
     if (document.getElementById("h3-studio-mv-styles")) return;
@@ -30,20 +100,17 @@ function installStudioStyles() {
         .h3-btn-gen-prompt { background: #007acc; border: 1px solid rgba(255, 255, 255, 0.2); color: #ffffff; font-size: 13px; font-weight: bold; padding: 10px 16px; border-radius: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4); }
         .h3-btn-gen-prompt:hover { background: #0088e6; }
         .h3-btn-gen-prompt:disabled { background: #2b2b2b; color: #6e7681; cursor: not-allowed; }
-        
         .h3-cast-sing-block { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
         .h3-cast-sing-row { display: flex; align-items: center; gap: 10px; background: #151518; padding: 5px 8px; border-radius: 6px; border: 1px solid #282828; }
         .h3-cast-toggle-chip { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; background: #202020; border: 1px solid #383838; border-radius: 6px; padding: 4px 0; cursor: pointer; font-size: 10px; font-weight: 600; color: #8b949e; user-select: none; }
         .h3-cast-toggle-chip.active { background: #007acc; border-color: #5bb3f5; color: #ffffff; font-weight: bold; }
         .h3-sing-check-label { display: flex; align-items: center; gap: 4px; font-size: 10px; font-weight: bold; color: #dbe0e6; cursor: pointer; user-select: none; }
         .h3-sing-check-label input { cursor: pointer; margin: 0; }
-        
         .h3-guide-banner { background: #0c1824; border: 1px solid #1d456b; border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 11px; }
         .h3-guide-title { font-weight: bold; color: #5bb3f5; display: flex; align-items: center; gap: 6px; }
         .h3-guide-list { margin: 0; padding-left: 18px; color: #c0d1e3; line-height: 1.6; }
         .h3-guide-list b { color: #ffcc00; }
         .h3-guide-current { font-size: 10px; color: #8bb4dc; border-top: 1px dashed #20476e; padding-top: 4px; margin-top: 2px; }
-
         .h3-fixed-media-area { display: flex; flex-direction: column; background: #000000; border-top: 1px solid #282828; flex-shrink: 0; box-sizing: border-box; position: relative; }
         .h3-media-resizer-bar { display: flex; justify-content: space-between; align-items: center; padding: 1px 10px; background: #141416; border-bottom: 1px solid #24262b; cursor: row-resize; user-select: none; height: 18px; box-sizing: border-box; }
         .h3-media-resizer-bar:hover { background: #1c1d21; }
@@ -56,7 +123,6 @@ function installStudioStyles() {
         .h3-section-title { font-size: 11px; font-weight: bold; color: #ffffff; padding-left: 2px; }
         .h3-section-sub { font-size: 9px; font-weight: normal; color: #8b949e; margin-left: 4px; }
         .h3-lane { display: flex; gap: 6px; padding: 2px 0 0 0; background: transparent; border: none; overflow-x: auto; width: 100%; min-height: 80px; align-items: center; box-sizing: border-box; }
-        
         .h3-slot { position: relative; flex: 0 0 68px; width: 68px; height: 76px; border-radius: 8px; background: #202020; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; overflow: hidden; box-sizing: border-box; }
         .h3-slot.image-slot, .h3-slot.keyframe-slot { border: 1px dashed #3a75a4; }
         .h3-slot.image-slot.occupied, .h3-slot.keyframe-slot.occupied { border: 1px solid #5bb3f5; background-size: cover; background-position: center; }
@@ -69,9 +135,7 @@ function installStudioStyles() {
         .h3-audio-name { font-size: 8px; color: #dbe0e6; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; text-align: center; pointer-events: none; }
         .h3-slot-del-btn { position: absolute; top: 2px; right: 2px; background: rgba(180, 40, 40, 0.85); color: #fff; width: 14px; height: 14px; border-radius: 50%; border: none; font-size: 9px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 2; }
         .h3-slot-del-btn:hover { background: #d32f2f; }
-        
         .h3-slot-badge { position: absolute; top: 2px; left: 2px; background: rgba(0,0,0,0.7); font-size: 8px; padding: 1px 3px; border-radius: 3px; z-index: 1; pointer-events: none; color: #dbe0e6; }
-        
         .h3-clip-results-container { display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; overflow-y: auto; padding-right: 4px; }
         .h3-clip-results-container::-webkit-scrollbar { width: 6px; }
         .h3-clip-results-container::-webkit-scrollbar-thumb { background: #383838; border-radius: 3px; }
@@ -153,6 +217,11 @@ app.registerExtension({
                 let state = { items: [] };
                 try { if (wMap["timeline_data"] && wMap["timeline_data"].value) state = JSON.parse(wMap["timeline_data"].value); } catch (e) {}
 
+                document.addEventListener("h3_seeds_updated", () => {
+                    try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) {}
+                    if (activeTab === "cache") renderTabContent();
+                });
+
                 const bindReal = (wName, label, isMultiline = false, placeholder = "") => {
                     const w = wMap[wName];
                     if (!w) return document.createElement("div");
@@ -184,26 +253,21 @@ app.registerExtension({
 
                 const bindVInputWithTemplate = (key, labelText, templateText, placeholderText = "") => {
                     const row = document.createElement("div"); row.className = "h3-field-row";
-                    
                     const labelBar = document.createElement("div");
                     labelBar.style.cssText = "display:flex; justify-content:space-between; align-items:center;";
-
                     const lbl = document.createElement("label");
                     lbl.textContent = labelText;
                     lbl.style.cssText = "font-size:10px; color:#9aa0a6; font-weight:bold;";
-
                     const btnTpl = document.createElement("button");
                     btnTpl.type = "button";
                     btnTpl.innerHTML = `📋 テンプレを挿入`;
                     btnTpl.style.cssText = "background:#1e2430; border:1px solid #324765; color:#5bb3f5; font-size:10px; font-weight:bold; padding:2px 8px; border-radius:4px; cursor:pointer;";
                     btnTpl.title = "最適化された記入テンプレートを入力欄に挿入します";
-
                     const el = document.createElement("textarea");
                     el.style.cssText = "background:#202020; color:#ffffff; border:1px solid #383838; padding:8px; border-radius:8px; min-height:86px; outline:none; font-family:inherit; font-size:11px; line-height:1.5;";
                     el.placeholder = placeholderText || templateText;
                     el.value = getV(key, "");
                     el.oninput = () => setV(key, el.value);
-
                     btnTpl.onclick = (e) => {
                         e.preventDefault();
                         if (!el.value.trim() || confirm("入力欄をテンプレートで上書きしますか？")) {
@@ -211,7 +275,6 @@ app.registerExtension({
                             setV(key, templateText);
                         }
                     };
-
                     labelBar.append(lbl, btnTpl);
                     row.append(labelBar, el);
                     return row;
@@ -332,7 +395,6 @@ app.registerExtension({
 
                 updatePlanGuide = () => {
                     const totalMusic = parseFloat(getV("total_music_sec", "90")) || 90;
-                    
                     const calcClips = (duration) => {
                         if (totalMusic <= duration) return 1;
                         const netLater = duration - OVERLAP_SEC;
@@ -385,7 +447,8 @@ app.registerExtension({
                     { id: "cast", label: "キャラクター設定" },
                     { id: "clip", label: "クリップ" },
                     { id: "llm", label: "LLM設定" },
-                    { id: "prompt", label: "プロンプト生成" }
+                    { id: "prompt", label: "プロンプト生成" },
+                    { id: "cache", label: "Seed/Latent管理" }
                 ];
 
                 const tabButtons = {};
@@ -397,7 +460,7 @@ app.registerExtension({
                         activeTab = t.id;
                         Object.values(tabButtons).forEach(b => b.classList.remove("active"));
                         btn.classList.add("active");
-                        fixedMediaArea.style.display = (activeTab === "llm" || activeTab === "prompt") ? "none" : "flex";
+                        fixedMediaArea.style.display = (activeTab === "llm" || activeTab === "prompt" || activeTab === "cache") ? "none" : "flex";
                         renderTabContent();
                     };
                     tabButtons[t.id] = btn;
@@ -445,7 +508,7 @@ app.registerExtension({
                     if (!text || !text.trim()) return;
                     
                     for (let i = 1; i <= 14; i++) {
-                        if (getV(`c${i}_locked`, false)) continue; // ★ ロック保護
+                        if (getV(`c${i}_locked`, false)) continue;
                         setV(`c${i}_enabled`, false);
                         for (let j = 1; j <= 4; j++) {
                             setV(`c${i}_s${j}_enabled`, false);
@@ -460,7 +523,7 @@ app.registerExtension({
                         const clipNum = parseInt(clipBlocks[idx]);
                         const blockContent = clipBlocks[idx + 1] || "";
                         if (clipNum < 1 || clipNum > 14) continue;
-                        if (getV(`c${clipNum}_locked`, false)) continue; // ★ ロック保護
+                        if (getV(`c${clipNum}_locked`, false)) continue;
 
                         setV(`c${clipNum}_enabled`, true);
 
@@ -519,7 +582,7 @@ app.registerExtension({
                         durationInput.style.cssText = "width:50px; background:#000; color:#fff; border:1px solid #555; padding:4px 6px; border-radius:4px; font-size:11px; text-align:center; outline:none;";
                         durationInput.oninput = () => { setV("clip_duration_sec", durationInput.value); };
                         durationRow.append(durationLabel, durationInput);
-                        analysisBlock.appendChild(durationRow);
+                        analysisBlock.append(bTitle, durationRow);
 
                         const audioOptions = [
                             { value: "auto", label: "自動判別 (Geminiなら直接音源解析 / その他はPython波形解析)" },
@@ -553,9 +616,7 @@ app.registerExtension({
 
                         genSbBtn.onclick = async () => {
                             genSbBtn.disabled = true; genSbBtn.innerHTML = `<span>⏳ 楽曲を解析中... (LLM通信中)</span>`;
-                            
                             const connectedDirectivesJson = getConnectedDirectivesJson();
-
                             const payload = {
                                 global_summary: getV("global_summary", ""),
                                 global_retention: getV("global_retention", ""),
@@ -570,7 +631,6 @@ app.registerExtension({
                             try {
                                 const controller = new AbortController();
                                 const timeoutId = setTimeout(() => controller.abort(), 600000);
-
                                 const res = await fetch("/h3/generate_storyboard_mv", {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
@@ -578,7 +638,6 @@ app.registerExtension({
                                     signal: controller.signal
                                 });
                                 clearTimeout(timeoutId);
-
                                 const data = await res.json();
                                 if (data.success && data.storyboard) {
                                     sbTextarea.value = data.storyboard;
@@ -666,14 +725,12 @@ app.registerExtension({
                                     if (stat.tier === "LOW") dot = "🔵";
                                     else if (stat.tier === "MID") dot = "🟡";
                                     else if (stat.tier === "HIGH") dot = "🔴";
-                                    
                                     if (stat.trans) dot += "🔀";
                                     indicator = dot;
                                 } else {
                                     indicator = "🟢";
                                 }
                             }
-                            // ★ ロック状態をクリップボタンに表示
                             if (getV(`c${i}_locked`, false)) {
                                 indicator += "🔒";
                             }
@@ -695,7 +752,6 @@ app.registerExtension({
                         titleBar.style.cssText = "display:flex; align-items:center; gap:12px; margin-bottom:8px; flex-wrap:wrap;";
                         const title = document.createElement("div"); title.className = "h3-char-title"; title.textContent = `クリップ ${activeClipTab}`;
                         
-                        // ★ ロックチェックボックスを追加
                         const lockLabel = document.createElement("label");
                         lockLabel.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
                         const lockChk = document.createElement("input");
@@ -721,7 +777,6 @@ app.registerExtension({
                         editorContainer.style.display = "flex";
                         editorContainer.style.flexDirection = "column";
 
-                        // ★ ロックされている場合は半透明にして無効化
                         if (getV(`c${activeClipTab}_locked`, false)) {
                             editorContainer.style.opacity = "0.4";
                             editorContainer.style.pointerEvents = "none";
@@ -776,19 +831,25 @@ app.registerExtension({
                         );
 
                     } else if (activeTab === "prompt") {
-                        const titlePrompt = document.createElement("div"); titlePrompt.className = "h3-char-title"; titlePrompt.innerHTML = `MiniMax H3 クリッププロンプト生成 <span style="color:gray; font-size:smaller; font-weight:normal;">(タブを切り替えると生成が中断されます)</span>`;
+                        const titlePrompt = document.createElement("div"); 
+                        titlePrompt.className = "h3-char-title"; 
+                        titlePrompt.innerHTML = `MiniMax H3 クリッププロンプト生成 <span style="color:gray; font-size:smaller; font-weight:normal;">(タブを切り替えると生成が中断されます)</span>`;
                         
                         contentArea.append(titlePrompt, buildPlanGuideBanner("guide-banner-prompt"));
 
-                        const genBtn = document.createElement("button"); genBtn.className = "h3-btn-gen-prompt"; genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳 (ロック中クリップは除外)</span>`;
-                        const clipResContainer = document.createElement("div"); clipResContainer.className = "h3-clip-results-container";
+                        const genBtn = document.createElement("button"); 
+                        genBtn.className = "h3-btn-gen-prompt"; 
+                        genBtn.innerHTML = `<span>▶ 全てのクリップを構築・翻訳 (ロック中クリップは除外)</span>`;
+                        
+                        const clipResContainer = document.createElement("div"); 
+                        clipResContainer.className = "h3-clip-results-container";
 
                         const genClipWidget = wMap["generated_clip_prompts"];
                         
                         const updateClipResultsUI = () => {
                             clipResContainer.replaceChildren();
-                            let clipData = {};
-                            try { clipData = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
+                            let cd = {};
+                            try { cd = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
 
                             for (let i = 1; i <= 14; i++) {
                                 if (getV(`c${i}_enabled`, i === 1)) {
@@ -803,7 +864,6 @@ app.registerExtension({
                                     t.style.marginTop = "0";
                                     t.textContent = `クリップ ${i} プロンプト`;
 
-                                    // ★ ロックチェックボックスを追加
                                     const lockLabel = document.createElement("label");
                                     lockLabel.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
                                     const lockChk = document.createElement("input");
@@ -824,7 +884,7 @@ app.registerExtension({
 
                                     const cta = document.createElement("textarea"); 
                                     cta.className = "h3-clip-result-textarea"; 
-                                    cta.value = clipData[i] || "";
+                                    cta.value = cd[i] || "";
                                     
                                     const applyLockState = () => {
                                         if (lockChk.checked) {
@@ -873,7 +933,6 @@ app.registerExtension({
                                             Object.assign(payload, parsed);
                                         } catch(e) {}
                                         
-                                        // 送信前に一時的にロックを解除（明示的な「このクリップのみ構築」ボタンはロックをバイパスして上書きするため）
                                         const originalLock = payload[`c${i}_locked`];
                                         payload[`c${i}_locked`] = false;
 
@@ -901,7 +960,6 @@ app.registerExtension({
                                         } finally { 
                                             singleBtn.disabled = false; 
                                             singleBtn.textContent = "［このクリップのみ構築・翻訳］"; 
-                                            // ロック状態を元に戻す
                                             if (originalLock) setV(`c${i}_locked`, true);
                                         }
                                     };
@@ -940,7 +998,7 @@ app.registerExtension({
                                 if (data.success && data.clip_prompts) {
                                     let current = {};
                                     try { current = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
-                                    Object.assign(current, data.clip_prompts); // ロックされたクリップはレスポンスに含まれないため、既存の current はそのまま維持される
+                                    Object.assign(current, data.clip_prompts);
                                     const strData = JSON.stringify(current);
                                     if (genClipWidget) { genClipWidget.value = strData; if (genClipWidget.callback) genClipWidget.callback(strData); }
                                     updateClipResultsUI();
@@ -951,6 +1009,92 @@ app.registerExtension({
                         
                         contentArea.append(genBtn, clipResContainer);
                         updatePlanGuide();
+
+                    } else if (activeTab === "cache") {
+                        const card = document.createElement("div"); 
+                        card.className = "h3-char-card";
+                        card.style.cssText = "background:transparent; border:none; padding:0;";
+
+                        if (!clipData.cache_settings) clipData.cache_settings = {};
+
+                        let enabledCount = 0;
+                        for (let i = 1; i <= 14; i++) {
+                            if (getV(`c${i}_enabled`, i === 1)) {
+                                enabledCount++;
+                                
+                                if (!clipData.cache_settings[i]) {
+                                    clipData.cache_settings[i] = { seed: -1, last_seed: null, save_latent: false };
+                                }
+                                const cInfo = clipData.cache_settings[i];
+
+                                const row = document.createElement("div");
+                                row.style.cssText = "display:flex; align-items:center; gap:6px; background:#14161b; padding:6px 10px; border-radius:6px; border:1px solid #242730; margin-bottom:6px;";
+                                
+                                const badge = document.createElement("div");
+                                badge.style.cssText = "flex: 0 0 24px; font-size:11px; font-weight:bold; color:#8bb4dc; user-select:none; text-align:center;";
+                                badge.textContent = `[${i}]`;
+
+                                const lblSeed = document.createElement("span");
+                                lblSeed.textContent = "Seed:";
+                                lblSeed.style.cssText = "font-size:10px; color:#9aa0a6; margin-left:4px;";
+
+                                const inpSeed = document.createElement("input");
+                                inpSeed.type = "text";
+                                inpSeed.value = cInfo.seed;
+                                inpSeed.style.cssText = "flex: 0 0 120px; background:#08090b; border:1px solid #383e4c; border-radius:4px; color:#ffffff; font-family:Consolas, monospace; font-size:11px; padding:4px 6px; outline:none;";
+                                inpSeed.oninput = () => {
+                                    const val = inpSeed.value.replace(/[^0-9-]/g, "");
+                                    cInfo.seed = val ? parseInt(val) : -1;
+                                    saveClipData();
+                                };
+
+                                const btnRand = document.createElement("button");
+                                btnRand.textContent = "🎲 ランダム";
+                                btnRand.title = "Seedを -1 (ランダム) にリセットします";
+                                btnRand.style.cssText = "background:#20242c; border:1px solid #383e4c; color:#dbe0e6; font-size:10px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:pointer;";
+                                btnRand.onclick = () => {
+                                    cInfo.seed = -1;
+                                    inpSeed.value = -1;
+                                    saveClipData();
+                                };
+
+                                const btnFix = document.createElement("button");
+                                btnFix.textContent = cInfo.last_seed ? `♻️ 固定 (${cInfo.last_seed})` : "♻️ 固定";
+                                btnFix.disabled = !cInfo.last_seed;
+                                btnFix.title = cInfo.last_seed ? "前回の生成で使われた数値で固定してスキップ可能にします" : "まだ生成されていません";
+                                btnFix.style.cssText = `background:#20242c; border:1px solid #383e4c; color:${cInfo.last_seed ? '#dbe0e6' : '#555'}; font-size:10px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:${cInfo.last_seed ? 'pointer' : 'not-allowed'};`;
+                                btnFix.onclick = () => {
+                                    if (cInfo.last_seed) {
+                                        cInfo.seed = cInfo.last_seed;
+                                        inpSeed.value = cInfo.last_seed;
+                                        saveClipData();
+                                    }
+                                };
+
+                                const lblLatent = document.createElement("label");
+                                lblLatent.style.cssText = "display:flex; align-items:center; gap:4px; font-size:10px; font-weight:bold; color:#ffcc00; cursor:pointer; margin-left:auto;";
+                                const chkLatent = document.createElement("input");
+                                chkLatent.type = "checkbox";
+                                chkLatent.checked = cInfo.save_latent;
+                                chkLatent.onchange = () => {
+                                    cInfo.save_latent = chkLatent.checked;
+                                    saveClipData();
+                                };
+                                lblLatent.append(chkLatent, document.createTextNode("💾 Latentをキャッシュ保存"));
+
+                                row.append(badge, lblSeed, inpSeed, btnRand, btnFix, lblLatent);
+                                card.appendChild(row);
+                            }
+                        }
+                        
+                        if (enabledCount === 0) {
+                            const msg = document.createElement("div");
+                            msg.style.cssText = "font-size:11px; color:#888; padding:10px;";
+                            msg.textContent = "有効なクリップがありません。「クリップ」タブで有効にしてください。";
+                            card.appendChild(msg);
+                        }
+                        
+                        contentArea.appendChild(card);
                     }
                 };
 
@@ -989,38 +1133,25 @@ app.registerExtension({
                         if (laneType !== "audio") {
                             slot.style.backgroundImage = `url('/view?filename=${encodeURIComponent(item.value)}&type=input')`;
                         } else {
-                            const icon = document.createElement("div");
-                            icon.className = "h3-audio-icon";
-                            icon.textContent = "🎵";
-                            const nameEl = document.createElement("div");
-                            nameEl.className = "h3-audio-name";
-                            nameEl.textContent = item.value.split("/").pop();
+                            const icon = document.createElement("div"); icon.className = "h3-audio-icon"; icon.textContent = "🎵";
+                            const nameEl = document.createElement("div"); nameEl.className = "h3-audio-name"; nameEl.textContent = item.value.split("/").pop();
                             slot.append(icon, nameEl);
                         }
 
-                        const del = document.createElement("button");
-                        del.className = "h3-slot-del-btn";
-                        del.textContent = "×";
+                        const del = document.createElement("button"); del.className = "h3-slot-del-btn"; del.textContent = "×";
                         del.onclick = (e) => {
                             e.stopPropagation();
                             state.items = state.items.filter(it => !((it.laneType || it.type) === laneType && it.slot === slotIdx));
-                            if (wMap["timeline_data"]) {
-                                wMap["timeline_data"].value = JSON.stringify(state);
-                                if (wMap["timeline_data"].callback) wMap["timeline_data"].callback(wMap["timeline_data"].value);
-                            }
+                            if (wMap["timeline_data"]) { wMap["timeline_data"].value = JSON.stringify(state); if (wMap["timeline_data"].callback) wMap["timeline_data"].callback(wMap["timeline_data"].value); }
                             renderFixedMediaLanes();
                         };
                         slot.appendChild(del);
                     } else {
-                        const add = document.createElement("div");
-                        add.className = "h3-slot-add";
-                        add.textContent = "+";
+                        const add = document.createElement("div"); add.className = "h3-slot-add"; add.textContent = "+";
                         slot.appendChild(add);
 
                         slot.onclick = () => {
-                            activeSlotConfig = { type: laneType, index: slotIdx };
-                            fileInput.accept = acceptTypes;
-                            fileInput.click();
+                            activeSlotConfig = { type: laneType, index: slotIdx }; fileInput.accept = acceptTypes; fileInput.click();
                         };
                     }
 
@@ -1030,38 +1161,28 @@ app.registerExtension({
                         if (e.dataTransfer.files.length > 0) {
                             const file = e.dataTransfer.files[0];
                             const form = new FormData();
-                            form.append("image", file, file.name);
-                            form.append("type", "input");
+                            form.append("image", file, file.name); form.append("type", "input");
                             const res = await api.fetchApi("/upload/image", { method: "POST", body: form });
                             const json = await res.json();
                             state.items = state.items.filter(it => !((it.laneType || it.type) === laneType && it.slot === slotIdx));
                             state.items.push({ type: laneType, value: json.name, slot: slotIdx, laneType: laneType });
-                            if (wMap["timeline_data"]) {
-                                wMap["timeline_data"].value = JSON.stringify(state);
-                                if (wMap["timeline_data"].callback) wMap["timeline_data"].callback(wMap["timeline_data"].value);
-                            }
+                            if (wMap["timeline_data"]) { wMap["timeline_data"].value = JSON.stringify(state); if (wMap["timeline_data"].callback) wMap["timeline_data"].callback(wMap["timeline_data"].value); }
                             if (laneType === "audio" && slotIdx === 4) detectAudioDuration(json.name);
                             renderFixedMediaLanes();
                         }
                     };
-
                     laneEl.appendChild(slot);
                 };
 
                 fileInput.onchange = async () => {
                     if (fileInput.files.length > 0 && activeSlotConfig) {
                         const file = fileInput.files[0];
-                        const form = new FormData();
-                        form.append("image", file, file.name);
-                        form.append("type", "input");
+                        const form = new FormData(); form.append("image", file, file.name); form.append("type", "input");
                         const res = await api.fetchApi("/upload/image", { method: "POST", body: form });
                         const json = await res.json();
                         state.items = state.items.filter(it => !((it.laneType || it.type) === activeSlotConfig.type && it.slot === activeSlotConfig.index));
                         state.items.push({ type: activeSlotConfig.type, value: json.name, slot: activeSlotConfig.index, laneType: activeSlotConfig.type });
-                        if (wMap["timeline_data"]) {
-                            wMap["timeline_data"].value = JSON.stringify(state);
-                            if (wMap["timeline_data"].callback) wMap["timeline_data"].callback(wMap["timeline_data"].value);
-                        }
+                        if (wMap["timeline_data"]) { wMap["timeline_data"].value = JSON.stringify(state); if (wMap["timeline_data"].callback) wMap["timeline_data"].callback(wMap["timeline_data"].value); }
                         if (activeSlotConfig.type === "audio" && activeSlotConfig.index === 4) detectAudioDuration(json.name);
                         renderFixedMediaLanes();
                     }
@@ -1070,53 +1191,28 @@ app.registerExtension({
                 const renderFixedMediaLanes = () => {
                     mediaBody.replaceChildren();
 
-                    const imgBlock = document.createElement("div");
-                    imgBlock.className = "h3-lane-block";
+                    const imgBlock = document.createElement("div"); imgBlock.className = "h3-lane-block";
                     imgBlock.innerHTML = `<div class="h3-section-title">リファレンス画像 <span class="h3-section-sub">(Picture 1-9)</span></div>`;
-                    const imgLane = document.createElement("div");
-                    imgLane.className = "h3-lane";
-                    imgBlock.appendChild(imgLane);
-                    for (let i = 0; i < 9; i++) {
-                        buildSlot(imgLane, "image", i, "image/*");
-                    }
+                    const imgLane = document.createElement("div"); imgLane.className = "h3-lane"; imgBlock.appendChild(imgLane);
+                    for (let i = 0; i < 9; i++) buildSlot(imgLane, "image", i, "image/*");
 
-                    const kfBlock = document.createElement("div");
-                    kfBlock.className = "h3-lane-block";
+                    const kfBlock = document.createElement("div"); kfBlock.className = "h3-lane-block";
                     kfBlock.innerHTML = `<div class="h3-section-title">キーフレーム画像 <span class="h3-section-sub">(First Frame / Last Frame)</span></div>`;
-                    const kfLane = document.createElement("div");
-                    kfLane.className = "h3-lane";
-                    kfBlock.appendChild(kfLane);
-                    buildSlot(kfLane, "keyframe", 0, "image/*", true, "開始");
-                    buildSlot(kfLane, "keyframe", 1, "image/*", true, "終了");
+                    const kfLane = document.createElement("div"); kfLane.className = "h3-lane"; kfBlock.appendChild(kfLane);
+                    buildSlot(kfLane, "keyframe", 0, "image/*", true, "開始"); buildSlot(kfLane, "keyframe", 1, "image/*", true, "終了");
 
-                    const vidBlock = document.createElement("div");
-                    vidBlock.className = "h3-lane-block";
+                    const vidBlock = document.createElement("div"); vidBlock.className = "h3-lane-block";
                     vidBlock.innerHTML = `<div class="h3-section-title">リファレンス映像 <span class="h3-section-sub">(Video 1-2)</span></div>`;
-                    const vidLane = document.createElement("div");
-                    vidLane.className = "h3-lane";
-                    vidBlock.appendChild(vidLane);
-                    for (let i = 0; i < 2; i++) {
-                        buildSlot(vidLane, "video", i, "video/*");
-                    }
+                    const vidLane = document.createElement("div"); vidLane.className = "h3-lane"; vidBlock.appendChild(vidLane);
+                    for (let i = 0; i < 2; i++) buildSlot(vidLane, "video", i, "video/*");
 
-                    const audBlock = document.createElement("div");
-                    audBlock.className = "h3-lane-block";
+                    const audBlock = document.createElement("div"); audBlock.className = "h3-lane-block";
                     audBlock.innerHTML = `<div class="h3-section-title">音声ボックス <span class="h3-section-sub">(Audio 1-3, Drive, Final)</span></div>`;
-                    const audLane = document.createElement("div");
-                    audLane.className = "h3-lane";
-                    audLane.style.flexWrap = "wrap";
-                    audBlock.appendChild(audLane);
+                    const audLane = document.createElement("div"); audLane.className = "h3-lane"; audLane.style.flexWrap = "wrap"; audBlock.appendChild(audLane);
                     
-                    for (let i = 0; i < 3; i++) {
-                        buildSlot(audLane, "audio", i, "audio/*");
-                    }
-                    
-                    const spacer = document.createElement("div");
-                    spacer.style.width = "12px";
-                    audLane.appendChild(spacer);
-                    
-                    buildSlot(audLane, "audio", 3, "audio/*", false, "Drive");
-                    buildSlot(audLane, "audio", 4, "audio/*", false, "Final");
+                    for (let i = 0; i < 3; i++) buildSlot(audLane, "audio", i, "audio/*");
+                    const spacer = document.createElement("div"); spacer.style.width = "12px"; audLane.appendChild(spacer);
+                    buildSlot(audLane, "audio", 3, "audio/*", false, "Drive"); buildSlot(audLane, "audio", 4, "audio/*", false, "Final");
 
                     mediaBody.append(imgBlock, kfBlock, vidBlock, audBlock);
                 };
@@ -1148,3 +1244,4 @@ app.registerExtension({
         }
     }
 });
+// === END OF FILE ===

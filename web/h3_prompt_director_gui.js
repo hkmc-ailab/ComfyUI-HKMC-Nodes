@@ -1,6 +1,77 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+if (!window._h3_gui_queue_hooked) {
+    window._h3_gui_queue_hooked = true;
+    const origToPrompt = app.graphToPrompt;
+    app.graphToPrompt = async function () {
+        const res = await origToPrompt.apply(this, arguments);
+        const p = res.output;
+        let needsUiUpdate = false;
+
+        for (const [id, node] of Object.entries(p)) {
+            if (node.class_type === "H3PromptDirector_MV" || node.class_type === "H3PromptDirectorGUI") {
+                let jsonStr = node.inputs["clips_data_json"];
+                if (jsonStr) {
+                    try {
+                        let data = JSON.parse(jsonStr);
+                        if (!data.cache_settings) data.cache_settings = {};
+                        
+                        let hasChanged = false;
+                        for (let i = 1; i <= 14; i++) {
+                            if (!data.cache_settings[i]) continue;
+                            
+                            if (data.cache_settings[i].seed === -1) {
+                                let newSeed = Math.floor(Math.random() * 1125899906842624) + 1;
+                                data.cache_settings[i].seed = newSeed;
+                                data.cache_settings[i].last_seed = newSeed;
+                                hasChanged = true;
+                                
+                                const gNode = app.graph.getNodeById(Number(id));
+                                if (gNode) {
+                                    const w = gNode.widgets.find(w => w.name === "clips_data_json");
+                                    if (w) {
+                                        let wData = JSON.parse(w.value);
+                                        if (!wData.cache_settings) wData.cache_settings = {};
+                                        if (!wData.cache_settings[i]) wData.cache_settings[i] = { seed: -1, save_latent: false };
+                                        wData.cache_settings[i].last_seed = newSeed;
+                                        w.value = JSON.stringify(wData);
+                                        needsUiUpdate = true;
+                                    }
+                                }
+                            } else {
+                                data.cache_settings[i].last_seed = data.cache_settings[i].seed;
+                                const gNode = app.graph.getNodeById(Number(id));
+                                if (gNode) {
+                                    const w = gNode.widgets.find(w => w.name === "clips_data_json");
+                                    if (w) {
+                                        let wData = JSON.parse(w.value);
+                                        if (!wData.cache_settings) wData.cache_settings = {};
+                                        if (!wData.cache_settings[i]) wData.cache_settings[i] = { seed: -1, save_latent: false };
+                                        wData.cache_settings[i].last_seed = data.cache_settings[i].seed;
+                                        w.value = JSON.stringify(wData);
+                                        needsUiUpdate = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (hasChanged) {
+                            node.inputs["clips_data_json"] = JSON.stringify(data);
+                        }
+                    } catch(e) { console.error(e); }
+                }
+            }
+        }
+        
+        if (needsUiUpdate) {
+            document.dispatchEvent(new CustomEvent("h3_seeds_updated"));
+        }
+        
+        return res;
+    };
+}
+
+
 function installStudioStyles() {
     if (document.getElementById("h3-studio-styles")) return;
     const style = document.createElement("style");
@@ -535,6 +606,20 @@ app.registerExtension({
                     if (w.inputEl) w.inputEl.style.display = "none";
                 });
 
+                let clipData = {};
+                try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) { clipData = {}; }
+
+                const saveClipData = () => {
+                    if (wMap["clips_data_json"]) {
+                        wMap["clips_data_json"].value = JSON.stringify(clipData);
+                        if (wMap["clips_data_json"].callback) wMap["clips_data_json"].callback(wMap["clips_data_json"].value);
+                    }
+                };
+
+                const getV = (key, def) => clipData[key] !== undefined ? clipData[key] : def;
+                const setV = (key, val) => { clipData[key] = val; saveClipData(); };
+
+
                 for (let i = 1; i <= 3; i++) {
                     if (wMap[`char${i}_enabled`] && wMap[`char${i}_enabled`].value === undefined) {
                         wMap[`char${i}_enabled`].value = (i === 1);
@@ -610,6 +695,11 @@ app.registerExtension({
                         state = JSON.parse(wMap["timeline_data"].value);
                     }
                 } catch (e) {}
+                
+                document.addEventListener("h3_seeds_updated", () => {
+                    try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) {}
+                    if (activeTab === "cache") renderTabContent();
+                });
 
                 const root = document.createElement("div");
                 root.className = "h3-studio-container";
@@ -627,7 +717,8 @@ app.registerExtension({
                     { id: "clip", label: "クリップ" },
                     { id: "auto", label: "おまかせ" },
                     { id: "llm", label: "LLM設定" },
-                    { id: "prompt", label: "プロンプト生成" }
+                    { id: "prompt", label: "プロンプト生成" },
+                    { id: "cache", label: "Seed/Latent管理" }
                 ];
 
                 const tabButtons = {};
@@ -640,7 +731,7 @@ app.registerExtension({
                         Object.values(tabButtons).forEach(b => b.classList.remove("active"));
                         btn.classList.add("active");
                         
-                        if (activeTab === "llm" || activeTab === "prompt") {
+                        if (activeTab === "llm" || activeTab === "prompt" || activeTab === "cache") {
                             fixedMediaArea.style.display = "none";
                         } else {
                             fixedMediaArea.style.display = "flex";
@@ -1159,7 +1250,8 @@ app.registerExtension({
 
                         for (let i = 1; i <= 10; i++) {
                             const isEnabled = wMap[`c${i}_enabled`] && !!wMap[`c${i}_enabled`].value;
-                            const indicator = isEnabled ? "🟢" : "⚫";
+                            let indicator = isEnabled ? "🟢" : "⚫";
+                            if (getV(`c${i}_locked`, false)) indicator += "🔒";
                             
                             const btn = document.createElement("div");
                             btn.innerHTML = `<span style="font-size:8px; margin-right:4px; pointer-events:none;">${indicator}</span>C${i}`;
@@ -1194,6 +1286,18 @@ app.registerExtension({
                         const title = document.createElement("div");
                         title.className = "h3-char-title";
                         title.textContent = `クリップ ${activeClipTab}`;
+
+                        const lockLabel = document.createElement("label");
+                        lockLabel.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
+                        const lockChk = document.createElement("input");
+                        lockChk.type = "checkbox";
+                        lockChk.checked = getV(`c${activeClipTab}_locked`, false);
+                        lockLabel.append(lockChk, document.createTextNode("🔒 プロンプトをロック"));
+
+                        lockChk.onchange = () => {
+                            setV(`c${activeClipTab}_locked`, lockChk.checked);
+                            renderTabContent();
+                        };
 
                         const enWidget = wMap[`c${activeClipTab}_enabled`];
                         const enLabel = document.createElement("label");
@@ -1254,8 +1358,17 @@ app.registerExtension({
                         };
                         linkLabel.append(linkChk, document.createTextNode("今回の動画を次に繋げる"));
 
-                        titleBar.append(title, enLabel, contLabel, linkLabel);
+                        titleBar.append(title, lockLabel, enLabel, contLabel, linkLabel);
                         activeClipCard.appendChild(titleBar);
+
+                        const editorContainer = document.createElement("div");
+                        editorContainer.style.display = "flex";
+                        editorContainer.style.flexDirection = "column";
+
+                        if (getV(`c${activeClipTab}_locked`, false)) {
+                            editorContainer.style.opacity = "0.4";
+                            editorContainer.style.pointerEvents = "none";
+                        }
 
                         const shotToggleBar = document.createElement("div");
                         shotToggleBar.className = "h3-top-toggle-bar";
@@ -1291,7 +1404,7 @@ app.registerExtension({
                             chip.append(chk, span);
                             shotToggleBar.appendChild(chip);
                         }
-                        activeClipCard.appendChild(shotToggleBar);
+                        editorContainer.appendChild(shotToggleBar);
 
                         for (let j = 1; j <= 4; j++) {
                             if (!clipShotEnabledState[activeClipTab][j]) continue;
@@ -1311,9 +1424,10 @@ app.registerExtension({
                             const diaBlock = createDialogueWithSpeaker(`c${activeClipTab}_s${j}`, j===1 ? "S1" : "None");
 
                             card.append(cardTitle, timeRow, actionRow, diaBlock);
-                            activeClipCard.appendChild(card);
+                            editorContainer.appendChild(card);
                         }
 
+                        activeClipCard.appendChild(editorContainer);
                         contentArea.appendChild(activeClipCard);
 
                     } else if (activeTab === "auto") {
@@ -1578,7 +1692,56 @@ app.registerExtension({
                         const genBtn = document.createElement("button");
                         genBtn.id = "main-gen-btn";
                         genBtn.className = "h3-btn-gen-prompt";
-                        genBtn.innerHTML = `<span>▶ プロンプト生成を実行</span>`;
+                        genBtn.innerHTML = `<span>▶ 全てのプロンプトを構築・翻訳 (ロック中クリップは除外)</span>`;
+
+                        const useWidget = wMap["use_custom_prompt"];
+                        const banner = document.createElement("div");
+                        banner.className = "h3-use-prompt-banner";
+
+                        const chkUse = document.createElement("input");
+                        chkUse.type = "checkbox";
+                        chkUse.checked = useWidget ? !!useWidget.value : false;
+
+                        const txtGroup = document.createElement("div");
+                        txtGroup.innerHTML = `<span class="h3-use-prompt-text">このプロンプトで動画を生成する</span><span class="h3-use-prompt-sub">(生成時にLLMを実行せずこのプロンプトを使用 / OllamaはVRAM解放)</span>`;
+
+                        banner.onclick = (e) => {
+                            if (e.target !== chkUse) chkUse.checked = !chkUse.checked;
+                            if (useWidget) {
+                                useWidget.value = chkUse.checked;
+                                if (useWidget.callback) useWidget.callback(chkUse.checked);
+                            }
+                        };
+                        banner.append(chkUse, txtGroup);
+
+                        // === ベースプロンプトのヘッダー ===
+                        const baseHeader = document.createElement("div");
+                        baseHeader.style.cssText = "display:flex; justify-content:space-between; align-items:flex-end; margin-top:12px;";
+                        
+                        const baseTitleBox = document.createElement("div");
+                        baseTitleBox.style.cssText = "display:flex; align-items:center; gap:12px;";
+                        
+                        const baseTitle = document.createElement("div");
+                        baseTitle.className = "h3-clip-result-title";
+                        baseTitle.style.marginTop = "0";
+                        baseTitle.textContent = "ベースプロンプト";
+
+                        const baseLockLbl = document.createElement("label");
+                        baseLockLbl.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
+                        const baseLockChk = document.createElement("input");
+                        baseLockChk.type = "checkbox";
+                        baseLockChk.checked = getV("base_locked", false);
+                        baseLockLbl.append(baseLockChk, document.createTextNode("🔒 ロック"));
+
+                        baseTitleBox.append(baseTitle, baseLockLbl);
+
+                        const baseSingleBtn = document.createElement("button");
+                        baseSingleBtn.textContent = "［このベースプロンプトのみ構築・翻訳］";
+                        baseSingleBtn.style.cssText = "background:#1e2430; border:1px solid #324765; color:#5bb3f5; font-size:10px; font-weight:bold; padding:3px 8px; border-radius:4px; cursor:pointer; transition:all 0.1s;";
+                        baseSingleBtn.onmouseenter = () => { baseSingleBtn.style.background = "#2b3446"; };
+                        baseSingleBtn.onmouseleave = () => { baseSingleBtn.style.background = "#1e2430"; };
+                        
+                        baseHeader.append(baseTitleBox, baseSingleBtn);
 
                         const ta = document.createElement("textarea");
                         ta.className = "h3-prompt-textarea";
@@ -1596,47 +1759,137 @@ app.registerExtension({
                             }
                         };
 
-                        const useWidget = wMap["use_custom_prompt"];
-                        const banner = document.createElement("div");
-                        banner.className = "h3-use-prompt-banner";
+                        const applyBaseLockState = () => {
+                            if (baseLockChk.checked) {
+                                ta.readOnly = true; ta.style.opacity = "0.5"; ta.style.pointerEvents = "none";
+                                baseSingleBtn.style.display = "none";
+                                baseTitle.textContent = "ベースプロンプト (🔒 ロック中)";
+                                baseTitle.style.color = "#8b949e";
+                            } else {
+                                ta.readOnly = false; ta.style.opacity = "1"; ta.style.pointerEvents = "auto";
+                                baseSingleBtn.style.display = "block";
+                                baseTitle.textContent = "ベースプロンプト (直接編集可能)";
+                                baseTitle.style.color = "#ffffff";
+                            }
+                        };
+                        applyBaseLockState();
+                        
+                        baseLockChk.onchange = () => {
+                            setV("base_locked", baseLockChk.checked);
+                            applyBaseLockState();
+                        };
 
-                        const chk = document.createElement("input");
-                        chk.type = "checkbox";
-                        chk.checked = useWidget ? !!useWidget.value : false;
+                        baseSingleBtn.onclick = async () => {
+                            baseSingleBtn.disabled = true; 
+                            baseSingleBtn.textContent = "⏳ 構築中...";
+                            
+                            const payload = { target_clip: "base" };
+                            node.widgets.forEach(w => { payload[w.name] = w.value; });
+                            try {
+                                const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                Object.assign(payload, parsed);
+                            } catch(e) {}
+                            
+                            const originalLock = payload.base_locked;
+                            payload.base_locked = false;
 
-                        const txtGroup = document.createElement("div");
-                        txtGroup.innerHTML = `<span class="h3-use-prompt-text">このプロンプトで動画を生成する</span><span class="h3-use-prompt-sub">(生成時にLLMを実行せずこのプロンプトを使用 / OllamaはVRAM解放)</span>`;
+                            try {
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 600000);
 
-                        banner.onclick = (e) => {
-                            if (e.target !== chk) chk.checked = !chk.checked;
-                            if (useWidget) {
-                                useWidget.value = chk.checked;
-                                if (useWidget.callback) useWidget.callback(chk.checked);
+                                const res = await fetch("/h3/generate_prompt", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify(payload),
+                                    signal: controller.signal
+                                });
+                                clearTimeout(timeoutId);
+
+                                const data = await res.json();
+                                if (data.success && data.prompt) {
+                                    ta.value = data.prompt;
+                                    ta.oninput();
+                                } else { 
+                                    alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); 
+                                }
+                            } catch (err) { 
+                                alert("通信エラー: " + err.message); 
+                            } finally { 
+                                baseSingleBtn.disabled = false; 
+                                baseSingleBtn.textContent = "［このベースプロンプトのみ構築・翻訳］"; 
+                                if (originalLock) setV("base_locked", true);
                             }
                         };
 
-                        banner.append(chk, txtGroup);
 
                         const clipResContainer = document.createElement("div");
                         clipResContainer.className = "h3-clip-results-container";
-
-                        // ▼ 修正: 直接編集可能なテキストエリアに変更
                         const genClipWidget = wMap["generated_clip_prompts"];
 
-                        const updateClipResultsUI = (clipData) => {
+                        const updateClipResultsUI = () => {
                             clipResContainer.replaceChildren();
-                            if (!clipData || typeof clipData !== "object") return;
+                            let cd = {};
+                            try { cd = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
                             
                             for (let i = 1; i <= 10; i++) {
-                                if (clipData[i] !== undefined && clipData[i] !== null && clipData[i] !== "") {
-                                    const t = document.createElement("div");
-                                    t.className = "h3-clip-result-title";
-                                    t.textContent = `クリップ ${i} プロンプト (直接編集可能)`;
+                                if (wMap[`c${i}_enabled`] && wMap[`c${i}_enabled`].value) {
+                                    const headerBar = document.createElement("div");
+                                    headerBar.style.cssText = "display:flex; justify-content:space-between; align-items:flex-end; margin-top:4px;";
                                     
+                                    const titleBlock = document.createElement("div");
+                                    titleBlock.style.cssText = "display:flex; align-items:center; gap:12px;";
+
+                                    const t = document.createElement("div"); 
+                                    t.className = "h3-clip-result-title"; 
+                                    t.style.marginTop = "0";
+                                    t.textContent = `クリップ ${i} プロンプト`;
+
+                                    const lockLabel = document.createElement("label");
+                                    lockLabel.style.cssText = "display:flex; align-items:center; gap:4px; font-size:11px; font-weight:bold; color:#ffcc00; cursor:pointer;";
+                                    const lockChk = document.createElement("input");
+                                    lockChk.type = "checkbox";
+                                    lockChk.checked = getV(`c${i}_locked`, false);
+                                    lockLabel.append(lockChk, document.createTextNode("🔒 ロック"));
+
+                                    titleBlock.append(t, lockLabel);
+
+                                    const singleBtn = document.createElement("button");
+                                    singleBtn.textContent = "［このクリップのみ構築・翻訳］";
+                                    singleBtn.title = `クリップ${i}のみをLLMに翻訳させます`;
+                                    singleBtn.style.cssText = "background:#1e2430; border:1px solid #324765; color:#5bb3f5; font-size:10px; font-weight:bold; padding:3px 8px; border-radius:4px; cursor:pointer; transition:all 0.1s;";
+                                    singleBtn.onmouseenter = () => { singleBtn.style.background = "#2b3446"; };
+                                    singleBtn.onmouseleave = () => { singleBtn.style.background = "#1e2430"; };
+
+                                    headerBar.append(titleBlock, singleBtn);
+
                                     const cta = document.createElement("textarea");
                                     cta.className = "h3-clip-result-textarea";
-                                    cta.value = clipData[i];
+                                    cta.value = cd[i] || "";
                                     
+                                    const applyLockState = () => {
+                                        if (lockChk.checked) {
+                                            cta.readOnly = true;
+                                            cta.style.opacity = "0.5";
+                                            cta.style.pointerEvents = "none";
+                                            singleBtn.style.display = "none";
+                                            t.textContent = `クリップ ${i} プロンプト (🔒 ロック中)`;
+                                            t.style.color = "#8b949e";
+                                        } else {
+                                            cta.readOnly = false;
+                                            cta.style.opacity = "1";
+                                            cta.style.pointerEvents = "auto";
+                                            singleBtn.style.display = "block";
+                                            t.textContent = `クリップ ${i} プロンプト (直接編集可能)`;
+                                            t.style.color = "#ffffff";
+                                        }
+                                    };
+                                    applyLockState();
+
+                                    lockChk.onchange = () => {
+                                        setV(`c${i}_locked`, lockChk.checked);
+                                        applyLockState();
+                                    };
+
                                     cta.oninput = () => {
                                         try {
                                             const current = JSON.parse(genClipWidget.value || "{}");
@@ -1646,15 +1899,55 @@ app.registerExtension({
                                         } catch(e) {}
                                     };
                                     
-                                    clipResContainer.append(t, cta);
+                                    singleBtn.onclick = async () => {
+                                        singleBtn.disabled = true; 
+                                        singleBtn.textContent = "⏳ 構築中...";
+                                        
+                                        const payload = { target_clip: i };
+                                        node.widgets.forEach(w => { payload[w.name] = w.value; });
+                                        try {
+                                            const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                            Object.assign(payload, parsed);
+                                        } catch(e) {}
+                                        
+                                        const originalLock = payload[`c${i}_locked`];
+                                        payload[`c${i}_locked`] = false;
+
+                                        try {
+                                            const controller = new AbortController();
+                                            const timeoutId = setTimeout(() => controller.abort(), 600000);
+
+                                            const res = await fetch("/h3/generate_prompt", {
+                                                method: "POST",
+                                                headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify(payload),
+                                                signal: controller.signal
+                                            });
+                                            clearTimeout(timeoutId);
+
+                                            const data = await res.json();
+                                            if (data.success && data.clip_prompts && data.clip_prompts[i]) {
+                                                cta.value = data.clip_prompts[i];
+                                                cta.oninput();
+                                            } else { 
+                                                alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); 
+                                            }
+                                        } catch (err) { 
+                                            alert("通信エラー: " + err.message); 
+                                        } finally { 
+                                            singleBtn.disabled = false; 
+                                            singleBtn.textContent = "［このクリップのみ構築・翻訳］"; 
+                                            if (originalLock) setV(`c${i}_locked`, true);
+                                        }
+                                    };
+
+                                    clipResContainer.append(headerBar, cta);
                                 }
                             }
                         };
 
-                        if (genClipWidget && genClipWidget.value) {
-                            try {
-                                updateClipResultsUI(JSON.parse(genClipWidget.value));
-                            } catch(e){}
+                        if (genClipWidget) {
+                            updateClipResultsUI();
                         }
 
                         genBtn.onclick = async () => {
@@ -1662,9 +1955,7 @@ app.registerExtension({
                             genBtn.innerHTML = `<span>⏳ プロンプト構築中... (LLM通信中)</span>`;
 
                             const payload = {};
-                            node.widgets.forEach(w => {
-                                payload[w.name] = w.value;
-                            });
+                            node.widgets.forEach(w => { payload[w.name] = w.value; });
 
                             for (let i = 1; i <= 3; i++) payload[`char${i}_enabled`] = charEnabledState[i];
                             for (let i = 1; i <= 4; i++) payload[`shot${i}_enabled`] = shotEnabledState[i];
@@ -1674,10 +1965,15 @@ app.registerExtension({
                                     payload[`c${i}_s${j}_enabled`] = !!clipShotEnabledState[i][j];
                                 }
                             }
+                            
+                            try {
+                                const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                Object.assign(payload, parsed);
+                            } catch(e) {}
 
                             try {
                                 const controller = new AbortController();
-                                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10分待機
+                                const timeoutId = setTimeout(() => controller.abort(), 600000);
 
                                 const res = await fetch("/h3/generate_prompt", {
                                     method: "POST",
@@ -1696,15 +1992,18 @@ app.registerExtension({
                                         }
                                     }
                                     if (data.clip_prompts) {
-                                        const strData = JSON.stringify(data.clip_prompts);
+                                        let current = {};
+                                        try { current = JSON.parse(genClipWidget.value || "{}"); } catch(e){}
+                                        Object.assign(current, data.clip_prompts);
+                                        const strData = JSON.stringify(current);
                                         if (genClipWidget) {
                                             genClipWidget.value = strData;
                                             if (genClipWidget.callback) genClipWidget.callback(strData);
                                         }
-                                        updateClipResultsUI(data.clip_prompts);
+                                        updateClipResultsUI();
                                     }
 
-                                    chk.checked = true;
+                                    chkUse.checked = true;
                                     if (useWidget) {
                                         useWidget.value = true;
                                         if (useWidget.callback) useWidget.callback(true);
@@ -1716,11 +2015,105 @@ app.registerExtension({
                                 alert("通信エラー: " + err.message);
                             } finally {
                                 genBtn.disabled = false;
-                                genBtn.innerHTML = `<span>▶ プロンプト生成を実行</span>`;
+                                genBtn.innerHTML = `<span>▶ 全てのプロンプトを構築・翻訳 (ロック中クリップは除外)</span>`;
                             }
                         };
 
-                        contentArea.append(titlePrompt, genBtn, banner, ta, clipResContainer);
+                        contentArea.append(titlePrompt, genBtn, banner, baseHeader, ta, clipResContainer);
+                        
+                    } else if (activeTab === "cache") {
+                        const card = document.createElement("div"); 
+                        card.className = "h3-char-card";
+                        card.style.cssText = "background:transparent; border:none; padding:0;";
+
+                        const infoBox = document.createElement("div");
+                        infoBox.style.cssText = "background:#1e2430; border:1px solid #324765; border-radius:6px; padding:10px; margin-bottom:12px;";
+                        const infoText = document.createElement("div");
+                        infoText.style.cssText = "font-size:11px; color:#c0d1e3; line-height:1.5;";
+                        infoText.innerHTML = "クリップ生成専用のSeed / Latent管理です。<br>ベース生成のSeed管理はSeed (rgthree)でお願いします。";
+                        infoBox.appendChild(infoText);
+                        card.appendChild(infoBox);
+
+                        if (!clipData.cache_settings) clipData.cache_settings = {};
+
+                        let enabledCount = 0;
+                        for (let i = 1; i <= 10; i++) {
+                            if (wMap[`c${i}_enabled`] && wMap[`c${i}_enabled`].value) {
+                                enabledCount++;
+                                
+                                if (!clipData.cache_settings[i]) {
+                                    clipData.cache_settings[i] = { seed: -1, last_seed: null, save_latent: false };
+                                }
+                                const cInfo = clipData.cache_settings[i];
+
+                                const row = document.createElement("div");
+                                row.style.cssText = "display:flex; align-items:center; gap:6px; background:#14161b; padding:6px 10px; border-radius:6px; border:1px solid #242730; margin-bottom:6px;";
+                                
+                                const badge = document.createElement("div");
+                                badge.style.cssText = "flex: 0 0 24px; font-size:11px; font-weight:bold; color:#8bb4dc; user-select:none; text-align:center;";
+                                badge.textContent = `[${i}]`;
+
+                                const lblSeed = document.createElement("span");
+                                lblSeed.textContent = "Seed:";
+                                lblSeed.style.cssText = "font-size:10px; color:#9aa0a6; margin-left:4px;";
+
+                                const inpSeed = document.createElement("input");
+                                inpSeed.type = "text";
+                                inpSeed.value = cInfo.seed;
+                                inpSeed.style.cssText = "flex: 0 0 120px; background:#08090b; border:1px solid #383e4c; border-radius:4px; color:#ffffff; font-family:Consolas, monospace; font-size:11px; padding:4px 6px; outline:none;";
+                                inpSeed.oninput = () => {
+                                    const val = inpSeed.value.replace(/[^0-9-]/g, "");
+                                    cInfo.seed = val ? parseInt(val) : -1;
+                                    saveClipData();
+                                };
+
+                                const btnRand = document.createElement("button");
+                                btnRand.textContent = "🎲 ランダム";
+                                btnRand.title = "Seedを -1 (ランダム) にリセットします";
+                                btnRand.style.cssText = "background:#20242c; border:1px solid #383e4c; color:#dbe0e6; font-size:10px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:pointer;";
+                                btnRand.onclick = () => {
+                                    cInfo.seed = -1;
+                                    inpSeed.value = -1;
+                                    saveClipData();
+                                };
+
+                                const btnFix = document.createElement("button");
+                                btnFix.textContent = cInfo.last_seed ? `♻️ 固定 (${cInfo.last_seed})` : "♻️ 固定";
+                                btnFix.disabled = !cInfo.last_seed;
+                                btnFix.title = cInfo.last_seed ? "前回の生成で使われた数値で固定してスキップ可能にします" : "まだ生成されていません";
+                                btnFix.style.cssText = `background:#20242c; border:1px solid #383e4c; color:${cInfo.last_seed ? '#dbe0e6' : '#555'}; font-size:10px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:${cInfo.last_seed ? 'pointer' : 'not-allowed'};`;
+                                btnFix.onclick = () => {
+                                    if (cInfo.last_seed) {
+                                        cInfo.seed = cInfo.last_seed;
+                                        inpSeed.value = cInfo.last_seed;
+                                        saveClipData();
+                                    }
+                                };
+
+                                const lblLatent = document.createElement("label");
+                                lblLatent.style.cssText = "display:flex; align-items:center; gap:4px; font-size:10px; font-weight:bold; color:#ffcc00; cursor:pointer; margin-left:auto;";
+                                const chkLatent = document.createElement("input");
+                                chkLatent.type = "checkbox";
+                                chkLatent.checked = cInfo.save_latent;
+                                chkLatent.onchange = () => {
+                                    cInfo.save_latent = chkLatent.checked;
+                                    saveClipData();
+                                };
+                                lblLatent.append(chkLatent, document.createTextNode("💾 Latentをキャッシュ保存"));
+
+                                row.append(badge, lblSeed, inpSeed, btnRand, btnFix, lblLatent);
+                                card.appendChild(row);
+                            }
+                        }
+                        
+                        if (enabledCount === 0) {
+                            const msg = document.createElement("div");
+                            msg.style.cssText = "font-size:11px; color:#888; padding:10px;";
+                            msg.textContent = "有効なクリップがありません。「クリップ」タブで有効にしてください。";
+                            card.appendChild(msg);
+                        }
+                        
+                        contentArea.appendChild(card);
                     }
                 };
 
@@ -1757,7 +2150,6 @@ app.registerExtension({
 
                     const badge = document.createElement("span");
                     badge.className = "h3-slot-badge";
-                    // customBadgeが指定されていればそれを、なければ #1〜 の連番を表示
                     badge.textContent = customBadge ? customBadge : `#${slotIdx + 1}`;
                     slot.appendChild(badge);
 
@@ -1864,7 +2256,6 @@ app.registerExtension({
                     audLane.style.flexWrap = "wrap";
                     audBlock.appendChild(audLane);
                     
-                    // Audio 1〜3
                     for (let i = 0; i < 3; i++) {
                         buildSlot(audLane, "audio", i, "audio/*");
                     }
@@ -1932,6 +2323,7 @@ app.registerExtension({
                             autoState = { ...autoState, ...JSON.parse(wMap["auto_data"].value) };
                         }
                     } catch(e){}
+                    try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) { clipData = {}; }
 
                     renderTabContent();
                     renderFixedMediaLanes();
