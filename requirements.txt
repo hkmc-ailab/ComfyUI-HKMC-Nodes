@@ -1,1 +1,3 @@
+google-generativeai
 google-genai
+openai
