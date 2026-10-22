@@ -248,7 +248,6 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
             elif res.status_code == 404:
                 continue
             else:
-                
                 raise RuntimeError(f"Gemini API 認証・通信エラー ({res.status_code}): {res.text}")
 
         err_text = last_res.text if last_res is not None else "Not Found"
@@ -281,7 +280,6 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None)
         res = requests.post(url, json=payload, timeout=900)
         res.raise_for_status()
         prompt_result = res.json().get("response", "").strip()
-        unload_ollama_vram(target_model)
         return prompt_result
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
@@ -406,7 +404,6 @@ def build_and_generate_prompt(kwargs):
 
     shots = []
     saved_dialogues = {}
-    
     has_silent_shot = False
 
     shot_counter = 0
@@ -694,12 +691,25 @@ async def handle_generate_prompt(request):
     try:
         data = await request.json()
         
-        prompt_result = await asyncio.to_thread(build_and_generate_prompt, data)
+        target_clip = str(data.get("target_clip", ""))
+        base_locked = data.get("base_locked", False)
+        
+        prompt_result = None
+        if (not target_clip or target_clip == "base") and not base_locked:
+            prompt_result = await asyncio.to_thread(build_and_generate_prompt, data)
+            if data.get("llm_provider") == "Ollama (Local)":
+                await asyncio.to_thread(unload_ollama_vram, data.get("llm_model", "qwen2.5:7b-instruct-q5_K_M"))
         
         clip_prompts_out = {}
         clips_to_translate = {}
         
         for i in range(1, 11):
+            if target_clip and target_clip != "base" and str(i) != target_clip:
+                continue
+                
+            if data.get(f"c{i}_locked", False):
+                continue
+                
             if data.get(f"c{i}_enabled", False):
                 clip_text_parts = []
                 is_clip_silent = False
@@ -746,9 +756,16 @@ async def handle_generate_prompt(request):
             translated = await asyncio.to_thread(translate_clip_texts, clips_to_translate, data)
             for k, v in translated.items():
                 clip_prompts_out[k] = v
+            if data.get("llm_provider") == "Ollama (Local)":
+                await asyncio.to_thread(unload_ollama_vram, data.get("llm_model", "qwen2.5:7b-instruct-q5_K_M"))
                 
         final_clip_prompts = {}
         for i in range(1, 11):
+            if target_clip and target_clip != "base" and str(i) != target_clip:
+                continue
+            if data.get(f"c{i}_locked", False):
+                continue
+
             txt = clip_prompts_out.get(i, "").strip()
             if txt:
                 auto_data_str = data.get("auto_data", "{}")
@@ -805,7 +822,7 @@ class H3PromptDirectorGUI:
                 "use_custom_prompt": ("BOOLEAN", {"default": False}),
                 "custom_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "llm_provider": (
-                    ["Ollama (Local)", "❌️Gemini (Cloud)", "ChatGPT (OpenAI)"],
+                    ["Ollama (Local)", "Gemini (Cloud)", "ChatGPT (OpenAI)"],
                     {"default": "Ollama (Local)"},
                 ),
                 "llm_api_key": ("STRING", {"default": ""}),
@@ -820,6 +837,8 @@ class H3PromptDirectorGUI:
                 "bgm": ("STRING", {"multiline": True, "default": ""}),
                 "timeline_data": ("STRING", {"default": '{"items":[]}'}),
                 "auto_data": ("STRING", {"default": '{"enabled":false, "overwrite":false, "noClips":false, "chars":["S1"], "duration":5, "clipCount":1, "story":""}'}),
+                "clips_data_json": ("STRING", {"default": "{}"}),
+                
                 "char1_enabled": ("BOOLEAN", {"default": True}),
                 "char1_preset": (char_list, {"default": "None"}),
                 "char1_name": ("STRING", {"default": ""}),
@@ -877,8 +896,8 @@ class H3PromptDirectorGUI:
 
         return inputs
 
-    RETURN_TYPES = ("STRING", "STRING", "H3_MEDIA_BUNDLE")
-    RETURN_NAMES = ("prompt", "clip_prompt", "media_bundle")
+    RETURN_TYPES = ("STRING", "STRING", "H3_MEDIA_BUNDLE", "H3_CLIP_CONTROL")
+    RETURN_NAMES = ("prompt", "clip_prompt", "media_bundle", "clip_control")
     FUNCTION = "process_studio"
     CATEGORY = "MiniMax_H3"
 
@@ -1007,8 +1026,20 @@ class H3PromptDirectorGUI:
             "drive_audio": drive_audio,
             "final_audio": final_audio,
         }
+        
+        clips_data_json = kwargs.get("clips_data_json", "{}")
+        try:
+            clips_data = json.loads(clips_data_json)
+        except:
+            clips_data = {}
 
-        return (prompt_result, clip_prompt_json, media_bundle)
+        clip_control = {
+            "cache_settings": clips_data.get("cache_settings", {}),
+            "prompts": parsed,
+        }
+
+        return (prompt_result, clip_prompt_json, media_bundle, clip_control)
+
 
 class H3MediaDispatcher:
     @classmethod
@@ -1120,6 +1151,7 @@ class H3MediaDispatcher:
         )
 
         return (raw_outputs,) + raw_outputs
+
 
 class HKMC_ModelSelector:
     @classmethod

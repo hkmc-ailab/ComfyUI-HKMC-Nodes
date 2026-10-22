@@ -886,8 +886,8 @@ class H3PromptDirector_MV:
         inputs["required"]["generated_clip_prompts"] = ("STRING", {"default": "{}"})
         return inputs
 
-    RETURN_TYPES = ("STRING", "H3_MEDIA_BUNDLE")
-    RETURN_NAMES = ("clip_prompt", "media_bundle")
+    RETURN_TYPES = ("STRING", "H3_MEDIA_BUNDLE", "H3_CLIP_CONTROL")
+    RETURN_NAMES = ("clip_prompt", "media_bundle", "clip_control")
     FUNCTION = "process_mv"
     CATEGORY = "MiniMax_H3"
 
@@ -929,7 +929,24 @@ class H3PromptDirector_MV:
             "images": images, "keyframes": keyframes, "videos": videos,
             "audios": audios, "drive_audio": drive_audio, "final_audio": final_audio,
         }
-        return (clip_prompt_json, media_bundle)
+
+        clips_data_json = kwargs.get("clips_data_json", "{}")
+        try:
+            clips_data = json.loads(clips_data_json)
+        except Exception:
+            clips_data = {}
+
+        try:
+            prompts_dict = json.loads(clip_prompt_json)
+        except Exception:
+            prompts_dict = {}
+
+        clip_control = {
+            "cache_settings": clips_data.get("cache_settings", {}),
+            "prompts": prompts_dict,
+        }
+
+        return (clip_prompt_json, media_bundle, clip_control)
 
 NODE_CLASS_MAPPINGS = {
     "H3PromptDirector_MV": H3PromptDirector_MV,
