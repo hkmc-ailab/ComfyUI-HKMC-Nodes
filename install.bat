@@ -40,7 +40,7 @@ if not defined PYTHON_EXE (
     echo [ERROR] ComfyUI の Python 環境が見つかりませんでした。
     echo 探索した環境: python_embeded, .venv, venv
     echo 手動で以下のコマンドを実行してください:
-    echo   python -m pip install google-generativeai google-genai openai
+    echo   python -m pip install google-generativeai google-genai openai opencv-python scipy
     echo.
     pause
     exit /b 1
@@ -54,9 +54,9 @@ echo [1/2] pip を最新化しています...
 "!PYTHON_EXE!" -m pip install --upgrade pip >nul 2>&1
 
 :: 必須パッケージの直接インストール
-echo [2/2] 必須パッケージ (google-generativeai, google-genai, openai) をインストールしています...
+echo [2/2] 必須パッケージ (google-genai, openai, opencv-python 等) をインストールしています...
 echo.
-"!PYTHON_EXE!" -m pip install google-generativeai google-genai openai
+"!PYTHON_EXE!" -m pip install google-generativeai google-genai openai opencv-python scipy
 set "INSTALL_RESULT=!ERRORLEVEL!"
 
 :: requirements.txt が存在する場合は追加でインストール
