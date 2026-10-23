@@ -10,12 +10,12 @@ echo.
 set "PYTHON_EXE="
 
 :: 1. ComfyUI ポータブル版 (python_embeded) の探索（階層パターン網羅）
-if exist "%~dp0..\..\..\python_embeded\python.exe" (
+if exist "%~dp0..\..\python_embeded\python.exe" (
+    set "PYTHON_EXE=%~dp0..\..\python_embeded\python.exe"
+) else if exist "%~dp0..\..\..\python_embeded\python.exe" (
     set "PYTHON_EXE=%~dp0..\..\..\python_embeded\python.exe"
 ) else if exist "%~dp0..\..\..\..\python_embeded\python.exe" (
     set "PYTHON_EXE=%~dp0..\..\..\..\python_embeded\python.exe"
-) else if exist "%~dp0..\..\python_embeded\python.exe" (
-    set "PYTHON_EXE=%~dp0..\..\python_embeded\python.exe"
 )
 
 :: 2. デスクトップ版 / 仮想環境 (.venv または venv) の探索
@@ -35,24 +35,16 @@ if not defined PYTHON_EXE (
     )
 )
 
-:: 3. システム標準の python にフォールバック
-if not defined PYTHON_EXE (
-    where python >nul 2>nul
-    if !ERRORLEVEL! equ 0 (
-        set "PYTHON_EXE=python"
-    )
-)
-
 :: Python が見つからなかった場合のエラー処理
 if not defined PYTHON_EXE (
-    echo [ERROR] ComfyUI の Python 環境 (python_embeded, .venv, venv) が見つかりませんでした。
+    echo [ERROR] ComfyUI の Python 環境が見つかりませんでした。
+    echo 探索した環境: python_embeded, .venv, venv
     echo 手動で以下のコマンドを実行してください:
     echo   python -m pip install google-generativeai google-genai openai
     echo.
     pause
     exit /b 1
 )
-
 echo [OK] 検出した Python:
 echo "!PYTHON_EXE!"
 echo.
@@ -65,25 +57,22 @@ echo [1/2] pip を最新化しています...
 echo [2/2] 必須パッケージ (google-generativeai, google-genai, openai) をインストールしています...
 echo.
 "!PYTHON_EXE!" -m pip install google-generativeai google-genai openai
+set "INSTALL_RESULT=!ERRORLEVEL!"
 
 :: requirements.txt が存在する場合は追加でインストール
 if exist "%~dp0requirements.txt" (
     echo.
     echo 追加の requirements.txt を適用しています...
     "!PYTHON_EXE!" -m pip install -r "%~dp0requirements.txt"
+    if errorlevel 1 set "INSTALL_RESULT=1"
 )
 
 echo.
-if !ERRORLEVEL! equ 0 (
-    echo ========================================================
-    echo   インストールが正常に完了しました！
-    echo   ComfyUI を起動（または再起動）してください。
-    echo ========================================================
+if "!INSTALL_RESULT!"=="0" (
+    echo インストールが正常に完了しました！
 ) else (
-    echo ========================================================
-    echo   [ERROR] インストール中にエラーが発生しました。
-    echo   ログを確認してください。
-    echo ========================================================
+    echo [ERROR] インストール中にエラーが発生しました。
+    echo ログや上のエラーメッセージを確認してください。
 )
 echo.
 pause
