@@ -345,7 +345,7 @@ def build_and_generate_prompt(kwargs):
     subjects = []
     char_refs = {}
 
-    for i in range(1, 4):
+    for i in range(1, 6):
         if not kwargs.get(f"char{i}_enabled", (i == 1)):
             continue
         preset = kwargs.get(f"char{i}_preset", "None")
@@ -573,7 +573,7 @@ async def handle_generate_auto_scenario(request):
         total_duration = round(duration + (clip_actual_duration * clip_count), 1) if not no_clips else float(duration)
         
         char_list_str = []
-        for i in range(1, 4):
+        for i in range(1, 6):
             if data.get(f"char{i}_enabled", False):
                 name = data.get(f"char{i}_name", "").strip()
                 preset = data.get(f"char{i}_preset", "None")
@@ -857,6 +857,18 @@ class H3PromptDirectorGUI:
                 "char3_pics": ("STRING", {"default": ""}),
                 "char3_audio": (audio_list, {"default": "None"}),
                 "char3_extra": ("STRING", {"multiline": True, "default": ""}),
+                "char4_enabled": ("BOOLEAN", {"default": False}),
+                "char4_preset": (char_list, {"default": "None"}),
+                "char4_name": ("STRING", {"default": ""}),
+                "char4_pics": ("STRING", {"default": ""}),
+                "char4_audio": (audio_list, {"default": "None"}),
+                "char4_extra": ("STRING", {"multiline": True, "default": ""}),
+                "char5_enabled": ("BOOLEAN", {"default": False}),
+                "char5_preset": (char_list, {"default": "None"}),
+                "char5_name": ("STRING", {"default": ""}),
+                "char5_pics": ("STRING", {"default": ""}),
+                "char5_audio": (audio_list, {"default": "None"}),
+                "char5_extra": ("STRING", {"multiline": True, "default": ""}),
                 "shot1_enabled": ("BOOLEAN", {"default": True}),
                 "shot1_time": ("STRING", {"default": "0秒〜3秒"}),
                 "shot1_action": ("STRING", {"multiline": True, "default": ""}),
