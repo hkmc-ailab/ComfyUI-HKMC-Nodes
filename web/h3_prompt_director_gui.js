@@ -620,7 +620,7 @@ app.registerExtension({
                 const setV = (key, val) => { clipData[key] = val; saveClipData(); };
 
 
-                for (let i = 1; i <= 3; i++) {
+                for (let i = 1; i <= 5; i++) {
                     if (wMap[`char${i}_enabled`] && wMap[`char${i}_enabled`].value === undefined) {
                         wMap[`char${i}_enabled`].value = (i === 1);
                     }
@@ -646,7 +646,7 @@ app.registerExtension({
                 }
 
                 const charEnabledState = {};
-                for(let i=1; i<=3; i++) charEnabledState[i] = wMap[`char${i}_enabled`] ? !!wMap[`char${i}_enabled`].value : (i===1);
+                for(let i=1; i<=5; i++) charEnabledState[i] = wMap[`char${i}_enabled`] ? !!wMap[`char${i}_enabled`].value : (i===1);
 
                 const shotEnabledState = {};
                 for(let i=1; i<=4; i++) shotEnabledState[i] = wMap[`shot${i}_enabled`] ? !!wMap[`shot${i}_enabled`].value : (i===1);
@@ -1006,7 +1006,9 @@ app.registerExtension({
                         { label: "なし", value: "None" },
                         { label: "キャラ1 (S1)", value: "S1" },
                         { label: "キャラ2 (S2)", value: "S2" },
-                        { label: "キャラ3 (S3)", value: "S3" }
+                        { label: "キャラ3 (S3)", value: "S3" },
+                        { label: "キャラ4 (S4)", value: "S4" },
+                        { label: "キャラ5 (S5)", value: "S5" }
                     ];
 
                     const chips = [];
@@ -1115,7 +1117,7 @@ app.registerExtension({
 
                         const charCards = {};
 
-                        for (let i = 1; i <= 3; i++) {
+                        for (let i = 1; i <= 5; i++) {
                             const isChecked = !!charEnabledState[i];
 
                             const chip = document.createElement("div");
@@ -1126,7 +1128,7 @@ app.registerExtension({
                             chk.checked = isChecked;
 
                             const span = document.createElement("span");
-                            span.textContent = `キャラクター${i}`;
+                            span.textContent = `キャラ${i} (S${i})`;
 
                             chip.onclick = (e) => {
                                 e.preventDefault();
@@ -1152,14 +1154,14 @@ app.registerExtension({
                         }
                         contentArea.appendChild(toggleBar);
 
-                        for (let i = 1; i <= 3; i++) {
+                        for (let i = 1; i <= 5; i++) {
                             const card = document.createElement("div");
                             card.className = "h3-char-card";
                             card.style.display = charEnabledState[i] ? "flex" : "none";
 
                             const title = document.createElement("div");
                             title.className = "h3-char-title";
-                            title.textContent = `キャラクター ${i}`;
+                            title.textContent = `キャラクター${i} (S${i})`;
 
                             const nameRow = bindInput(`char${i}_name`, "キャラクター名", false, "キャラクター名を英語で入力");
                             const presetRow = bindInput(`char${i}_preset`, "プリセット");
@@ -1957,7 +1959,7 @@ app.registerExtension({
                             const payload = {};
                             node.widgets.forEach(w => { payload[w.name] = w.value; });
 
-                            for (let i = 1; i <= 3; i++) payload[`char${i}_enabled`] = charEnabledState[i];
+                            for (let i = 1; i <= 5; i++) payload[`char${i}_enabled`] = charEnabledState[i];
                             for (let i = 1; i <= 4; i++) payload[`shot${i}_enabled`] = shotEnabledState[i];
                             for (let i = 1; i <= 10; i++) {
                                 payload[`c${i}_enabled`] = wMap[`c${i}_enabled`] ? !!wMap[`c${i}_enabled`].value : false;
@@ -2299,7 +2301,7 @@ app.registerExtension({
                 const onConfigure = node.onConfigure;
                 node.onConfigure = function () {
                     if (onConfigure) onConfigure.apply(this, arguments);
-                    for (let i = 1; i <= 3; i++) {
+                    for (let i = 1; i <= 5; i++) {
                         if (wMap[`char${i}_enabled`]) charEnabledState[i] = !!wMap[`char${i}_enabled`].value;
                     }
                     for (let i = 1; i <= 4; i++) {
