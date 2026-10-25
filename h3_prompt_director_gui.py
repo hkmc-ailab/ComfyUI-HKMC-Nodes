@@ -17,6 +17,20 @@ import scipy.io.wavfile as wavfile
 from server import PromptServer
 from aiohttp import web
 
+def get_refmod_files():
+    models_dir = folder_paths.models_dir
+    refmod_dir = os.path.join(models_dir, "refmods")
+    os.makedirs(refmod_dir, exist_ok=True)
+    
+    files = []
+    for root, _, filenames in os.walk(refmod_dir):
+        for f in filenames:
+            if f.endswith(".safetensors"):
+                rel_path = os.path.relpath(os.path.join(root, f), refmod_dir)
+                stem = rel_path[:-len(".safetensors")].replace("\\", "/")
+                files.append(stem)
+    files.sort()
+    return ["None"] + files
 
 def load_system_rules(is_auto=False):
     filename = "rules_auto.txt" if is_auto else "rules.txt"
@@ -815,6 +829,7 @@ class H3PromptDirectorGUI:
     @classmethod
     def INPUT_TYPES(cls):
         char_list = cls.get_character_files()
+        refmod_list = get_refmod_files()
         audio_list = ["None", "<Audio 1>", "<Audio 2>", "<Audio 3>"]
 
         inputs = {
@@ -842,30 +857,35 @@ class H3PromptDirectorGUI:
                 "char1_enabled": ("BOOLEAN", {"default": True}),
                 "char1_preset": (char_list, {"default": "None"}),
                 "char1_name": ("STRING", {"default": ""}),
+                "char1_refmod": (refmod_list, {"default": "None"}),
                 "char1_pics": ("STRING", {"default": ""}),
                 "char1_audio": (audio_list, {"default": "None"}),
                 "char1_extra": ("STRING", {"multiline": True, "default": ""}),
                 "char2_enabled": ("BOOLEAN", {"default": False}),
                 "char2_preset": (char_list, {"default": "None"}),
                 "char2_name": ("STRING", {"default": ""}),
+                "char2_refmod": (refmod_list, {"default": "None"}),
                 "char2_pics": ("STRING", {"default": ""}),
                 "char2_audio": (audio_list, {"default": "None"}),
                 "char2_extra": ("STRING", {"multiline": True, "default": ""}),
                 "char3_enabled": ("BOOLEAN", {"default": False}),
                 "char3_preset": (char_list, {"default": "None"}),
                 "char3_name": ("STRING", {"default": ""}),
+                "char3_refmod": (refmod_list, {"default": "None"}),
                 "char3_pics": ("STRING", {"default": ""}),
                 "char3_audio": (audio_list, {"default": "None"}),
                 "char3_extra": ("STRING", {"multiline": True, "default": ""}),
                 "char4_enabled": ("BOOLEAN", {"default": False}),
                 "char4_preset": (char_list, {"default": "None"}),
                 "char4_name": ("STRING", {"default": ""}),
+                "char4_refmod": (refmod_list, {"default": "None"}),
                 "char4_pics": ("STRING", {"default": ""}),
                 "char4_audio": (audio_list, {"default": "None"}),
                 "char4_extra": ("STRING", {"multiline": True, "default": ""}),
                 "char5_enabled": ("BOOLEAN", {"default": False}),
                 "char5_preset": (char_list, {"default": "None"}),
                 "char5_name": ("STRING", {"default": ""}),
+                "char5_refmod": (refmod_list, {"default": "None"}),
                 "char5_pics": ("STRING", {"default": ""}),
                 "char5_audio": (audio_list, {"default": "None"}),
                 "char5_extra": ("STRING", {"multiline": True, "default": ""}),
@@ -907,6 +927,10 @@ class H3PromptDirectorGUI:
         inputs["required"]["generated_clip_prompts"] = ("STRING", {"default": "{}"})
 
         return inputs
+        
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        return True
 
     RETURN_TYPES = ("STRING", "STRING", "H3_MEDIA_BUNDLE", "H3_CLIP_CONTROL")
     RETURN_NAMES = ("prompt", "clip_prompt", "media_bundle", "clip_control")
