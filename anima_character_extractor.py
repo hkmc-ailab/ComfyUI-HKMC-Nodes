@@ -6,7 +6,6 @@ from openai import OpenAI
 from server import PromptServer
 from aiohttp import web
 
-# charactersフォルダへ保存するためのAPI
 @PromptServer.instance.routes.post("/anima/save_character")
 async def save_character_file(request):
     try:
@@ -17,7 +16,6 @@ async def save_character_file(request):
         if not filename:
             return web.json_response({"success": False, "error": "ファイル名が空です。"}, status=400)
 
-        # HKMC-Nodes/characters フォルダをデフォルト保存先に指定
         base_dir = os.path.join(os.path.dirname(__file__), "characters")
         os.makedirs(base_dir, exist_ok=True)
 
@@ -41,13 +39,11 @@ class AnimaCharacterExtractor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # AnimaPromptDirectorの出力ピン "llm_context" を接続
                 "llm_context": ("LLM_CONTEXT",),
                 "character_prompt": ("STRING", {"multiline": True, "default": "", "label": "ここにキャラクタープロンプトを入力"}),
             }
         }
 
-    # ★ ShowTextへ不足タグを出力するピンを追加
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("missing_prompt",)
     OUTPUT_NODE = True
@@ -71,7 +67,6 @@ class AnimaCharacterExtractor:
         if not input_prompt.strip() or not output_text.strip():
             return ""
 
-        # 自動除外する一般的なメタタグ・品質タグ
         ignore_meta = {
             "1girl", "1boy", "solo", "anime style", "cel-shaded", "crisp outlines",
             "masterpiece", "best quality", "amazing quality", "very aesthetic",
@@ -80,13 +75,10 @@ class AnimaCharacterExtractor:
             "year 2024", "year 2025", "year 2026", "__quality__"
         }
 
-        # カンマまたは改行でタグを分割
         raw_tags = re.split(r'[,、\n]+', input_prompt)
         cleaned_tags = []
         for t in raw_tags:
-            # 括弧 ( ) [ ] や引用符を除去
             clean_t = re.sub(r'^[(\[\{<"\']+\vert{}[)\]\}>"\']+$', '', t.strip()).strip()
-            # 重み係数 :1.2 等を除去
             clean_t = re.sub(r':\d+(\.\d+)?$', '', clean_t).strip()
 
             if not clean_t:
@@ -101,7 +93,6 @@ class AnimaCharacterExtractor:
 
         for tag in cleaned_tags:
             tag_lower = tag.lower()
-            # 変換後のテキストに含まれていないタグを検出
             if tag_lower not in output_lower:
                 missing_list.append(tag)
 
@@ -172,19 +163,17 @@ class AnimaCharacterExtractor:
                 formatted_result = res.choices[0].message.content.strip()
 
             elif provider == "Ollama (Local)":
-                url = "http://localhost:11434/api/chat"
+                url = "http://localhost:11434/api/generate"
                 payload = {
                     "model": model_name.strip() or "llama3",
-                    "messages": [
-                        {"role": "system", "content": system_instruction},
-                        {"role": "user", "content": character_prompt}
-                    ],
+                    "prompt": f"{system_instruction}\n\n入力プロンプト:\n{character_prompt}", # ★ messages から prompt に変更
                     "stream": False,
                     "options": {"temperature": 0.2}
                 }
                 res = requests.post(url, json=payload, timeout=120)
                 res.raise_for_status()
-                formatted_result = res.json().get("message", {}).get("content", "").strip()
+                
+                formatted_result = res.json().get("response", "").strip()
                 self.unload_ollama(model_name)
 
             else:
@@ -199,7 +188,6 @@ class AnimaCharacterExtractor:
         formatted_result = re.sub(r'^```[a-zA-Z]*\n', '', formatted_result)
         formatted_result = re.sub(r'\n```$', '', formatted_result).strip()
 
-        # ★ 元プロンプトと変換後の差分を計算
         missing_result = self.find_missing_tags(character_prompt, formatted_result)
 
         return {

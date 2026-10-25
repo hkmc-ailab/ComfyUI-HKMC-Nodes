@@ -141,7 +141,6 @@ class AnimaPromptDirector:
                 "part_waist": ("BOOLEAN", {"default": True}),
                 "part_lower": ("BOOLEAN", {"default": True}),
                 "part_legs": ("BOOLEAN", {"default": True}),
-                # ★ ラベルを「完全な後ろ姿」に変更
                 "full_back_view": ("BOOLEAN", {"default": False, "label": "完全な後ろ姿"}),
                 "quality_prompt": ("STRING", {"multiline": True, "default": "__quality__, anime style, cel-shaded, crisp outlines"}),
                 "scene_prompt": ("STRING", {"multiline": True, "default": ""}),
@@ -338,13 +337,10 @@ class AnimaPromptDirector:
                 return res.choices[0].message.content.strip()
 
             elif provider == "Ollama (Local)":
-                url = "http://localhost:11434/api/chat"
+                url = "http://localhost:11434/api/generate"
                 payload = {
                     "model": model_name.strip() or "llama3",
-                    "messages": [
-                        {"role": "system", "content": system_instruction},
-                        {"role": "user", "content": user_text}
-                    ],
+                    "prompt": f"{system_instruction}\n\nUser Input: {user_text}", # ★ messages から prompt に変更
                     "stream": False,
                     "keep_alive": "10m",
                     "options": {
@@ -352,10 +348,11 @@ class AnimaPromptDirector:
                         "num_predict": 1500
                     }
                 }
-                print(f"[AnimaPromptDirector] Calling Ollama Chat API (Model: {model_name})... Waiting for response.")
+                print(f"[AnimaPromptDirector] Calling Ollama Generate API (Model: {model_name})... Waiting for response.")
                 res = requests.post(url, json=payload, timeout=180)
                 res.raise_for_status()
-                ans = res.json().get("message", {}).get("content", "").strip()
+                
+                ans = res.json().get("response", "").strip()
                 if ans:
                     print("[AnimaPromptDirector] Ollama Natural Language conversion successful.")
                     return ans
@@ -413,7 +410,6 @@ class AnimaPromptDirector:
         if lock_final_prompt and llm_provider == "Ollama (Local)":
             self.unload_ollama(llm_model)
 
-        # --- 1. ネガティブ ---
         if enable_negative:
             neg_parts = []
             if negative_preset != "None":
@@ -449,7 +445,6 @@ class AnimaPromptDirector:
                 resolved_neg = self.resolve_wildcards(negative_prompt.strip())
                 neg_parts.append(resolved_neg)
 
-            # ★ 完全な後ろ姿ON時：振り返り・前向き要素をネガティブに自動追加
             if full_back_view:
                 neg_parts.append("looking at viewer, facing front, front view, face, turning around, profile, side view")
 
@@ -460,23 +455,19 @@ class AnimaPromptDirector:
             full_neg_text = ""
             neg_conditioning = self.encode_text(clip, "")
 
-        # --- 2. ポジティブ ---
         if lock_final_prompt and final_positive_prompt.strip():
             structured_positive = self.resolve_wildcards(final_positive_prompt.strip())
         else:
             parsed = self.parse_character_file(character_preset)
             sections_list = []
 
-            # (1) 品質 / トリガー
             if quality_prompt.strip():
                 resolved_q = self.resolve_wildcards(quality_prompt.strip())
-                # quality_promptに直書きされた目などの前面要素も後ろ姿時は除去
                 resolved_q = self.filter_front_elements(resolved_q, is_back_view=full_back_view)
                 clean_q = resolved_q.rstrip(" ,")
                 if clean_q:
                     sections_list.append(("# --- QUALITY & BASE ---", clean_q))
 
-            # (2) 構図 / 背景
             processed_scene = self.resolve_wildcards(scene_prompt.strip())
             if processed_scene:
                 processed_scene = self.call_llm(
@@ -486,12 +477,10 @@ class AnimaPromptDirector:
                 clean_s = processed_scene.rstrip(" ,")
                 sections_list.append(("# --- SHOT & SCENE ---", clean_s))
 
-            # ★ 完全な後ろ姿ON時：決定打となる背面固定プロンプトを自動挿入
             if full_back_view:
                 back_enforce = "completely from behind, full back view, facing away from camera, back of head, back to camera, unseen face, facing completely backwards"
                 sections_list.append(("# --- POSE ENFORCEMENT ---", back_enforce))
 
-            # (3) キャラクター各部位
             char_map = [
                 (part_head, "# --- HEAD & FACE ---", ["HEAD", "FACE", "HAIR"]),
                 (part_upper, "# --- UPPER BODY ---", ["UPPER", "BODY", "CHEST"]),
@@ -509,7 +498,6 @@ class AnimaPromptDirector:
                         if part_text:
                             sections_list.append((header, part_text))
 
-            # 全体自然言語化
             if convert_all_to_natural and llm_provider != "None (Raw Tag)":
                 quality_section = [val for hdr, val in sections_list if hdr == "# --- QUALITY & BASE ---"]
                 target_sections = [(hdr, val) for hdr, val in sections_list if hdr != "# --- QUALITY & BASE ---"]
@@ -525,7 +513,6 @@ class AnimaPromptDirector:
                     final_parts.append(f"# --- QUALITY & BASE ---\n{quality_section[0]}")
                 
                 if natural_result and natural_result.strip():
-                    # ★ ここに追加：LLMが勝手に作文した face や eyes などの単語を完全な後ろ姿時に再除去する
                     if full_back_view:
                         natural_result = self.filter_front_elements(natural_result, is_back_view=True)
                     final_parts.append(natural_result.strip())
