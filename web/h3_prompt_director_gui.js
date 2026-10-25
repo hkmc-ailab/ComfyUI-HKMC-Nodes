@@ -71,6 +71,45 @@ if (!window._h3_gui_queue_hooked) {
     };
 }
 
+function syncRefModRemote(slotIndex, modName) {
+    if (!app.graph) return;
+
+    const allNodes = [];
+    const traverseGraph = (g) => {
+        if (!g || !g._nodes) return;
+        g._nodes.forEach(node => {
+            allNodes.push(node);
+            if (node.subgraph) {
+                traverseGraph(node.subgraph);
+            }
+        });
+    };
+    traverseGraph(app.graph);
+
+    const targetNode = allNodes.find(n => n.type === "MiniMaxH3RefModsLoader");
+    if (!targetNode) {
+        console.warn("[HKMC Remote] MiniMaxH3RefModsLoader が見つかりませんでした。");
+        return;
+    }
+
+    const targetWidgetName = `mod_${slotIndex}`;
+    const targetWidget = targetNode.widgets?.find(w => w.name === targetWidgetName);
+
+    if (targetWidget) {
+        const valToSet = (modName === "None" || !modName) ? "(none)" : modName;
+
+        if (targetWidget.options?.values?.includes(valToSet)) {
+            targetWidget.value = valToSet;
+            if (targetWidget.callback) {
+                targetWidget.callback(valToSet);
+            }
+            targetNode.setDirtyCanvas(true, true);
+            console.log(`[HKMC Remote] 遠隔反映成功: ${targetWidgetName} -> ${valToSet}`);
+        } else {
+            console.warn(`[HKMC Remote] 選択肢に ${valToSet} が存在しません。`);
+        }
+    }
+}
 
 function installStudioStyles() {
     if (document.getElementById("h3-studio-styles")) return;
@@ -1116,6 +1155,7 @@ app.registerExtension({
                         toggleBar.className = "h3-top-toggle-bar";
 
                         const charCards = {};
+                        const refmodSelects = {};
 
                         for (let i = 1; i <= 5; i++) {
                             const isChecked = !!charEnabledState[i];
@@ -1144,6 +1184,17 @@ app.registerExtension({
                                     if (wMap[`char${i}_enabled`].callback) wMap[`char${i}_enabled`].callback(active);
                                 }
 
+                                if (!active) {
+                                    if (wMap[`char${i}_refmod`]) {
+                                        wMap[`char${i}_refmod`].value = "None";
+                                        if (wMap[`char${i}_refmod`].callback) wMap[`char${i}_refmod`].callback("None");
+                                    }
+                                    if (refmodSelects[i]) {
+                                        refmodSelects[i].value = "None";
+                                    }
+                                    syncRefModRemote(i, "None");
+                                }
+
                                 if (charCards[i]) {
                                     charCards[i].style.display = active ? "flex" : "none";
                                 }
@@ -1165,11 +1216,19 @@ app.registerExtension({
 
                             const nameRow = bindInput(`char${i}_name`, "キャラクター名", false, "キャラクター名を英語で入力");
                             const presetRow = bindInput(`char${i}_preset`, "プリセット");
+                            const refmodRow = bindInput(`char${i}_refmod`, "RefMod");
+                            const refmodSelect = refmodRow.querySelector("select");
+                            if (refmodSelect) {
+                                refmodSelects[i] = refmodSelect;
+                                refmodSelect.addEventListener("change", (e) => {
+                                    syncRefModRemote(i, e.target.value);
+                                });
+                            }
                             const picRow = createPicCheckboxGroup(i);
                             const voiceRow = bindInput(`char${i}_audio`, "ボイスリファレンス");
                             const extraRow = bindInput(`char${i}_extra`, "特徴定義・追記", true, "キャラクターの特徴や追加の特徴を入力");
 
-                            card.append(title, nameRow, presetRow, picRow, voiceRow, extraRow);
+                            card.append(title, nameRow, presetRow, refmodRow, picRow, voiceRow, extraRow);
                             contentArea.appendChild(card);
                             charCards[i] = card;
                         }
@@ -2329,6 +2388,15 @@ app.registerExtension({
 
                     renderTabContent();
                     renderFixedMediaLanes();
+
+                    for (let i = 1; i <= 5; i++) {
+                        const isEnabled = wMap[`char${i}_enabled`] ? !!wMap[`char${i}_enabled`].value : (i === 1);
+                        if (!isEnabled) {
+                            syncRefModRemote(i, "None");
+                        } else if (wMap[`char${i}_refmod`]) {
+                            syncRefModRemote(i, wMap[`char${i}_refmod`].value);
+                        }
+                    }
                     
                     if (node.size[0] < 720 || node.size[1] < 905) {
                         node.setSize([Math.max(720, node.size[0]), Math.max(905, node.size[1])]);
