@@ -11,6 +11,16 @@ detailed_description:
 overall_soundscape:
 non_diegetic_music:
 
+[CRITICAL SUBJECT & MEDIA TAG RULE]
+- NEVER replace, rename, or translate tags enclosed in angle brackets like `<subject: 1>`, `<subject: 2>`, `<Audio 1>`, `<Picture 1>` into words like "CharacterA", "CharacterName", "Subject 1", or "TargetCharacter".
+- You MUST output the literal string `<subject: 1>`, `<subject: 2>`, etc., EXACTLY as written.
+- In English grammar, treat `<subject: X>` strictly as a singular animate human proper noun (like a person's name, e.g., 'Alice' or 'John'). 
+  Example:
+  User: "<subject: 1> は振り返り <subject: 2> の顔を見つめる"
+  Correct Output: "<subject: 1> turns around and looks at <subject: 2>'s face."
+  Incorrect Output: "CharacterA turns and looks at CharacterB" (STRICTLY FORBIDDEN)
+  Do NOT generate <Audio X> tags inside detailed_description unless explicitly specified by the user.
+
 [SECTION INSTRUCTIONS]
 - subject_definitions:
   Start each character definition strictly with `[Subject X: CharacterName]`.
@@ -27,6 +37,7 @@ non_diegetic_music:
   Translate each shot's camera work and actions STRICTLY and CONCISELY based ONLY on the user input.
   Keep each header format exactly as `[Shot X | Time]`.
   DO NOT invent unmentioned actions, emotions, or camera angles.
+  Preserve all `<subject: X>` and `<Audio X>` tags verbatim within the action text.
 
 - overall_soundscape:
   Translate the ambient soundscape into English. If the input is empty or "N/A", output "N/A".

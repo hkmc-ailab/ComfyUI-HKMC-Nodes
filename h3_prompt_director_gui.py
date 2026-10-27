@@ -305,9 +305,11 @@ def translate_clip_texts(clips_dict, kwargs):
     prompt_text = "Translate the following Japanese video generation prompts into English precisely.\n"
     prompt_text += "CRITICAL RULE 1: The translation MUST be 100% in English. NO Chinese. NO Japanese.\n"
     prompt_text += "CRITICAL RULE 2: DO NOT translate or modify any text inside <d>...</d> tags. Leave those tags and their exact contents completely untouched.\n"
-    prompt_text += "CRITICAL RULE 3: Output the translated texts wrapped in XML tags exactly corresponding to the input. Do not add any other text outside the XML tags.\n"
-    prompt_text += "CRITICAL RULE 4: DO NOT summarize or shorten the descriptions. Translate EVERY detail, including lighting, atmosphere, character emotions, and camera movements faithfully.\n"
-    prompt_text += "CRITICAL RULE 5: Keep any English instructions (such as 'CRITICAL: ...' or '[Shot X | ...]' or 'Do not continue...') exactly as they are. DO NOT translate or modify them.\n\n"
+    prompt_text += "CRITICAL RULE 3: DO NOT translate, modify, or remove any tags enclosed in <...> (such as <subject: 1>, <subject: 2>, <Audio 1>, <Picture 1>, etc.). Keep their exact format intact.\n"
+    prompt_text += "CRITICAL RULE 4: Treat '<subject: X>' strictly as an animate human proper noun (like a person's name, e.g. 'Alice' or 'John') in the grammatical structure. Ensure standard English sentence syntax (e.g. '<subject: 1> turns around and looks at <subject: 2>'). DO NOT omit subjects or convert sentences into awkward sentence fragments.\n"
+    prompt_text += "CRITICAL RULE 5: Output the translated texts wrapped in XML tags exactly corresponding to the input. Do not add any other text outside the XML tags.\n"
+    prompt_text += "CRITICAL RULE 6: DO NOT summarize or shorten the descriptions. Translate EVERY detail, including lighting, atmosphere, character emotions, and camera movements faithfully.\n"
+    prompt_text += "CRITICAL RULE 7: Keep any English instructions (such as 'CRITICAL: ...' or '[Shot X | ...]' or 'Do not continue...') exactly as they are. DO NOT translate or modify them.\n\n"
     
     for k, text in clips_dict.items():
         prompt_text += f"<clip_{k}>\n{text}\n</clip_{k}>\n\n"
@@ -447,14 +449,21 @@ def build_and_generate_prompt(kwargs):
                 dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
                 dia = re.sub(r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*", "", dia, flags=re.IGNORECASE)
                 dia = re.sub(r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE).strip().strip('"').strip("'")
-
                 if dia:
-                    if speaker_choice in ["S1", "S2", "S3"]:
+                    # ここでセリフ行を追加
+                    if speaker_choice.startswith("S") and speaker_choice[1:].isdigit():
                         dia_lines.append(f"{speaker_choice}: <d>[Japanese] {dia} </d>")
                     else:
                         dia_lines.append(f"<d>[Japanese] {dia} </d>")
-                    content.append(f"(Note for translation: Character {speaker_choice} is speaking here. Describe them visibly talking.)")
-            saved_dialogues[shot_counter] = dia_lines
+            
+            if dia_lines:
+                saved_dialogues[shot_counter] = dia_lines
+                # 隠しメッセージを1回だけ追加（Audioタグ混入禁止を明記）
+                if speaker_choice.startswith("S") and speaker_choice[1:].isdigit():
+                    subj_num = speaker_choice[1:]
+                    content.append(f"(Note for translation: Ensure <subject: {subj_num}> is described as visibly speaking/talking. DO NOT insert any <Audio> tags.)")
+                else:
+                    content.append(f"(Note for translation: Ensure the speaker is described as visibly speaking/talking. DO NOT insert any <Audio> tags.)")
 
         if content:
             shots.append(f"[Shot {shot_counter} | {norm_time}]\n" + "\n".join(content))
@@ -497,6 +506,13 @@ def build_and_generate_prompt(kwargs):
     temp = 0.7 if creative_mode != "オフ" else 0.3
 
     prompt_result = call_llm(sys_inst, provider, api_key, model_name, temp)
+
+    def fix_subject_tags(text):
+        text = re.sub(r'<s(?:ubject)?[:\s]+(\d+)>', r'<subject: \1>', text, flags=re.IGNORECASE)
+        text = re.sub(r'(?<!\[)Subject\s+(\d+)(?![:\]])', r'<subject: \1>', text)
+        return text
+        
+    prompt_result = fix_subject_tags(prompt_result)
 
     def fix_bracketed_subject(m):
         subj_num = m.group(1)
