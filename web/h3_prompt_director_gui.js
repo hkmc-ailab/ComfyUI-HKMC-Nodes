@@ -623,6 +623,39 @@ function installStudioStyles() {
             pointer-events: none;
             color: #dbe0e6;
         }
+        .h3-tag-btn-bar {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin: 4px 0 2px 0;
+            flex-wrap: wrap;
+        }
+        .h3-tag-btn {
+            background: #18191c;
+            border: 1px solid #333842;
+            color: #8bb4dc;
+            font-size: 10px;
+            font-weight: bold;
+            padding: 2px 7px;
+            border-radius: 4px;
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.12s;
+            line-height: 1.2;
+        }
+        .h3-tag-btn:hover {
+            background: #232834;
+            border-color: #5bb3f5;
+            color: #ffffff;
+        }
+        .h3-tag-btn.audio-tag {
+            color: #7ecf9d;
+            border-color: #2b4535;
+        }
+        .h3-tag-btn.audio-tag:hover {
+            border-color: #7ecf9d;
+            background: #1e3327;
+        }
     `;
     document.head.appendChild(style);
 }
@@ -1028,6 +1061,57 @@ app.registerExtension({
                     return wrapper;
                 };
 
+                const createQuickTagButtons = (actionRow, prefix) => {
+                    const bar = document.createElement("div");
+                    bar.className = "h3-tag-btn-bar";
+
+                    const insertTag = (tag) => {
+                        const ta = actionRow.querySelector("textarea");
+                        const w = wMap[`${prefix}_action`];
+                        if (!ta) return;
+
+                        const cur = ta.value || "";
+                        const spacer = (cur.length > 0 && !cur.endsWith(" ") && !cur.endsWith("\n")) ? " " : "";
+                        ta.value = cur + spacer + tag + " ";
+
+                        if (w) {
+                            w.value = ta.value;
+                            if (w.callback) w.callback(w.value);
+                        }
+                        ta.focus();
+                    };
+
+                    for (let s = 1; s <= 5; s++) {
+                        const btn = document.createElement("button");
+                        btn.type = "button";
+                        btn.className = "h3-tag-btn";
+                        btn.textContent = `S${s}`;
+                        btn.title = `<subject: ${s}> をアクションの末尾に挿入`;
+                        btn.onclick = (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            insertTag(`<subject: ${s}>`);
+                        };
+                        bar.appendChild(btn);
+                    }
+
+                    for (let a = 1; a <= 3; a++) {
+                        const btn = document.createElement("button");
+                        btn.type = "button";
+                        btn.className = "h3-tag-btn audio-tag";
+                        btn.textContent = `A${a}`;
+                        btn.title = `<Audio ${a}> をアクションの末尾に挿入`;
+                        btn.onclick = (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            insertTag(`<Audio ${a}>`);
+                        };
+                        bar.appendChild(btn);
+                    }
+
+                    return bar;
+                };
+
                 const createDialogueWithSpeaker = (prefix, defaultSpeaker) => {
                     const block = document.createElement("div");
                     block.className = "h3-dialogue-block";
@@ -1287,9 +1371,10 @@ app.registerExtension({
 
                             const timeRow = createTimePicker(`shot${i}`, i===1 ? 3 : i*3);
                             const actionRow = bindInput(`shot${i}_action`, "アクション / 構図", true, `ショット${i}_アクション/構図`);
+                            const tagBar = createQuickTagButtons(actionRow, `shot${i}`);
                             const diaBlock = createDialogueWithSpeaker(`shot${i}`, i===1 ? "S1" : "None");
 
-                            card.append(title, timeRow, actionRow, diaBlock);
+                            card.append(title, timeRow, tagBar, actionRow, diaBlock);
                             contentArea.appendChild(card);
                             shotCards[i] = card;
                         }
@@ -1482,9 +1567,10 @@ app.registerExtension({
 
                             const timeRow = createTimePicker(`c${activeClipTab}_s${j}`, j===1 ? 3 : j*3);
                             const actionRow = bindInput(`c${activeClipTab}_s${j}_action`, "アクション / 構図", true, `ショット${j}_アクション/構図`);
+                            const tagBar = createQuickTagButtons(actionRow, `c${activeClipTab}_s${j}`);
                             const diaBlock = createDialogueWithSpeaker(`c${activeClipTab}_s${j}`, j===1 ? "S1" : "None");
 
-                            card.append(cardTitle, timeRow, actionRow, diaBlock);
+                            card.append(cardTitle, timeRow, tagBar, actionRow, diaBlock);
                             editorContainer.appendChild(card);
                         }
 
