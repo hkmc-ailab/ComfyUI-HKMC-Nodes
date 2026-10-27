@@ -5,6 +5,7 @@ WEB_DIRECTORY = "./web"
 from .anima_prompt_director import AnimaPromptDirector
 from .anima_character_extractor import AnimaCharacterExtractor
 from .anima_resolution import AnimaResolutionSelector
+from .anima_dataset_stacker import AnimaDatasetStacker
 
 from .h3_prompt_director import (
     H3PromptDirector,
@@ -31,6 +32,7 @@ NODE_CLASS_MAPPINGS = {
     "AnimaPromptDirector": AnimaPromptDirector,
     "AnimaCharacterExtractor": AnimaCharacterExtractor,
     "AnimaResolutionSelector": AnimaResolutionSelector,
+    "AnimaDatasetStacker": AnimaDatasetStacker,
     "H3PromptDirector": H3PromptDirector,
     "H3MediaDispatcher": H3MediaDispatcher,
     "OllamaVRAMUnloader": OllamaVRAMUnloader,
@@ -57,6 +59,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaPromptDirector": "Anima Prompt Director",
     "AnimaCharacterExtractor": "Anima Character Extractor",
     "AnimaResolutionSelector": "Anima Resolution Selector",
+    "AnimaDatasetStacker": "Anima Dataset Stacker",
     "H3PromptDirector": "H3 Prompt Director",
     "H3MediaDispatcher": "H3 Media Dispatcher",
     "OllamaVRAMUnloader": "Ollama VRAM Unloader",
