@@ -12,22 +12,39 @@ overall_soundscape:
 non_diegetic_music:
 
 [CRITICAL SUBJECT & MEDIA TAG RULE]
-- NEVER replace, rename, or translate tags enclosed in angle brackets like `<subject: 1>`, `<subject: 2>`, `<Audio 1>`, `<Picture 1>` into words like "CharacterA", "CharacterName", "Subject 1", or "TargetCharacter".
-- You MUST output the literal string `<subject: 1>`, `<subject: 2>`, etc., EXACTLY as written.
-- In English grammar, treat `<subject: X>` strictly as a singular animate human proper noun (like a person's name, e.g., 'Alice' or 'John'). 
+- NEVER replace, rename, or translate tags enclosed in angle brackets like `<Subject 1>`, `<Subject 2>`, `<Audio 1>`, `<Picture 1>` into words like "CharacterA", "CharacterName", "Subject 1", or "TargetCharacter".
+- You MUST output the literal string `<Subject 1>`, `<Subject 2>`, etc., EXACTLY as written.
+- In English grammar, treat `<Subject X>` as a defined subject, which may be a person, object, or place (like a person's name, e.g., 'Alice' or 'John'). 
   Example:
-  User: "<subject: 1> は振り返り <subject: 2> の顔を見つめる"
-  Correct Output: "<subject: 1> turns around and looks at <subject: 2>'s face."
+  User: "<Subject 1> は振り返り <Subject 2> の顔を見つめる"
+  Correct Output: "<Subject 1> turns around and looks at <Subject 2>'s face."
   Incorrect Output: "CharacterA turns and looks at CharacterB" (STRICTLY FORBIDDEN)
   Do NOT generate <Audio X> tags inside detailed_description unless explicitly specified by the user.
 
 [SECTION INSTRUCTIONS]
 - subject_definitions:
-  Start each character definition strictly with `[Subject X: CharacterName]`.
-  Follow immediately on the next line with their physical appearance and extra details.
+  Start each subject definition with `<Subject X>` (X is 1-5). For named characters, write `<Subject X> name is CharacterName. CharacterName is ...`. For non-character subjects, retain their supplied description.
+  CRITICAL FOR FREE-INPUT SUBJECTS: The words following `<Subject X>` define WHAT `<Subject X>` ITSELF IS, not a scene in which an unspecified person or object is located. First identify the head noun / entity being defined, then make that entity the grammatical complement of `<Subject X> is ...`.
+  Translate Japanese noun phrases faithfully into natural English noun phrases. Preserve the original entity type (person, animal, building, prop, location, etc.), attributes, relationships, quantities, and spatial modifiers. Do not invent a person, viewer, protagonist, or implied occupant as the subject. Do not turn a noun phrase into a location or action description.
+  Example input: `<Subject 2> 木々に囲まれた古い木造小屋`
+  Correct: `<Subject 2> is an old wooden cabin surrounded by trees.`
+  Incorrect: `<Subject 2> is surrounded by trees in an old wooden cabin.` (This wrongly makes the cabin a location rather than the subject itself.)
+  Example input: `<Subject 3> 青く光る水晶`
+  Correct: `<Subject 3> is a crystal glowing blue.`
+  Example input: `<Subject 4> 雪に覆われた山頂`
+  Correct: `<Subject 4> is a snow-covered mountain summit.`
+  If the input already starts with `is`, retain a grammatical definition without duplicating `is`. Do not change a named character's identity or description while applying these free-input rules.
+  Preserve all physical appearance and extra details; preserve subject numbering and never invent missing subjects.
   Keep tags like <Picture X> and <Audio X> intact.
 
 - summary:
+  Write a concise English overview of the whole video, NOT a shot-by-shot script. The Stage / Setting and Overall Synopsis fields are the authoritative sources for summary content.
+  Start with the exact task prefix specified in "Summary Task Prefix" if nonempty. Do not invent a prefix when empty; RefMod assets bundled in safetensors do not by themselves count as direct <Picture X> or <Audio X> references.
+  Identify the relevant characters/people, the setting, and the overall sequence of events using the supplied stage and overall synopsis. Preserve <Subject X> labels where applicable.
+  Subject roles identify categories only: a character being configured does NOT require that character to appear in every shot. Follow the actual shot instructions for on-screen presence, dialogue, and absences.
+  Treat a background Subject as a possible stage. If exactly one background Subject exists, associate it with the stage when consistent with the supplied text. If multiple background Subjects exist, follow the supplied stage, synopsis, and shot order; never invent a location sequence. Do not assume that an object Subject is a location.
+  Translate the overall synopsis faithfully into English, without inventing events, extra characters, or new plot developments. Never use Movement & Timing as a source of summary events: that field belongs ONLY to detailed_description. Never include phrases such as "in the first shot", "in the second shot", "the camera pans", "zoom in", or shot-specific framing, camera directions, timecodes, dialogue, or expressions absent from the synopsis. If the synopsis is short, the summary must stay short. Do not repeat full physical definitions.
+  Only emit media reference tags that are explicitly provided; never output "None", "null", or placeholder text as a media reference. Character media-reference declarations are assembled by Python from GUI selections.
 {creative_instruction}
 
 - retention_analysis:
@@ -37,7 +54,7 @@ non_diegetic_music:
   Translate each shot's camera work and actions STRICTLY and CONCISELY based ONLY on the user input.
   Keep each header format exactly as `[Shot X | Time]`.
   DO NOT invent unmentioned actions, emotions, or camera angles.
-  Preserve all `<subject: X>` and `<Audio X>` tags verbatim within the action text.
+  Preserve all `<Subject X>` and `<Audio X>` tags verbatim within the action text.
 
 - overall_soundscape:
   Translate the ambient soundscape into English. If the input is empty or "N/A", output "N/A".
@@ -48,7 +65,11 @@ non_diegetic_music:
 
 [User Input]
 Character Concept: {char_description}
-Situation: {situation}
+Stage / Setting: {situation}
+Overall Synopsis: {overall_story}
+Subject Roles (for summary only):
+{summary_roles}
+Summary Task Prefix (direct media references only): {summary_task_tag}
 Movement & Timing: {timeline_seq}
 Retention: {quality_control}
 Soundscape: {ambient_sound}
