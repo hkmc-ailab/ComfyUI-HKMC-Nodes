@@ -29,7 +29,7 @@ if (!window._h3_gui_queue_hooked) {
                                 
                                 const gNode = app.graph.getNodeById(Number(id));
                                 if (gNode) {
-                                    const w = gNode.widgets.find(w => w.name === "clips_data_json");
+                                    const w = gNode.widgets?.find(w => w.name === "clips_data_json");
                                     if (w) {
                                         let wData = JSON.parse(w.value);
                                         if (!wData.cache_settings) wData.cache_settings = {};
@@ -43,7 +43,7 @@ if (!window._h3_gui_queue_hooked) {
                                 data.cache_settings[i].last_seed = data.cache_settings[i].seed;
                                 const gNode = app.graph.getNodeById(Number(id));
                                 if (gNode) {
-                                    const w = gNode.widgets.find(w => w.name === "clips_data_json");
+                                    const w = gNode.widgets?.find(w => w.name === "clips_data_json");
                                     if (w) {
                                         let wData = JSON.parse(w.value);
                                         if (!wData.cache_settings) wData.cache_settings = {};
@@ -669,9 +669,15 @@ app.registerExtension({
                 if (onNodeCreated) onNodeCreated.apply(this, arguments);
                 const node = this;
                 installStudioStyles();
+                const H3_MIN_WIDTH = 850;
+                const H3_MIN_HEIGHT = 1110;
+                let h3Disposed = false;
+                let h3SeedRefreshPending = false;
+                let h3SeedRefreshFrame = null;
+                let h3DragCleanup = null;
 
                 const wMap = {};
-                node.widgets.forEach(w => {
+                (node.widgets || []).forEach(w => {
                     wMap[w.name] = w;
                     w.draw = function () {};
                     w.computeSize = () => [0, -4];
@@ -687,7 +693,89 @@ app.registerExtension({
                         if (wMap["clips_data_json"].callback) wMap["clips_data_json"].callback(wMap["clips_data_json"].value);
                     }
                 };
-
+                const retentionRead = () => {
+                    try { return JSON.parse(wMap.retention_choices_json?.value || "{}"); }
+                    catch (_) { return {}; }
+                };
+                const retentionWrite = (data) => {
+                    const w = wMap.retention_choices_json;
+                    if (w) { w.value = JSON.stringify(data); if (w.callback) w.callback(w.value); }
+                };
+                const createRetentionSettings = () => {
+                    const panel = document.createElement("div");
+                    panel.className = "h3-char-card";
+                    panel.style.marginTop = "8px";
+                    const heading = document.createElement("div");
+                    heading.className = "h3-char-title";
+                    heading.textContent = "参照要素の保持設定（retention_analysis）";
+                    panel.appendChild(heading);
+                    const note = document.createElement("div");
+                    note.style.cssText = "font-size:11px;color:#b7c0ca;line-height:1.6;margin-bottom:8px;";
+                    note.textContent = "人物・物の外見や背景の特徴をどの程度引き継ぐか選びます。動きやカメラ角度は固定されません。禁止事項＆スタイル維持の入力も別途反映されます。";
+                    panel.appendChild(note);
+                    const data = retentionRead();
+                    const visual = [
+                        ["fully_preserved", "完全に維持（顔・形・色などを保つ）"],
+                        ["partially_preserved", "特徴を維持（構図・景色は変化可）"],
+                        ["weak_reference", "雰囲気だけ参考（自由度高め）"],
+                        ["attribute_transfer", "特徴を別の要素へ転用（転用先指定）"]
+                    ];
+                    const audio = [
+                        ["fully_copy", "音声をそのまま保持"],
+                        ["partially_copy", "音声の一部を保持"],
+                        ["reference", "声質・音の特徴を参考"],
+                        ["weak_reference", "音の雰囲気だけ参考"]
+                    ];
+                    const addChoice = (title, key, choices, defaultValue, targets) => {
+                        const row = document.createElement("div");
+                        row.style.cssText = "padding:7px 0;border-top:1px solid #343434;display:flex;flex-direction:column;gap:4px;";
+                        const label = document.createElement("label");
+                        label.style.cssText = "font-size:12px;color:#e5e5e5;";
+                        label.textContent = title;
+                        const select = document.createElement("select");
+                        select.style.cssText = "width:100%;background:#252525;color:#eee;border:1px solid #555;border-radius:5px;padding:6px;";
+                        for (const [value, text] of choices) {
+                            const opt = document.createElement("option"); opt.value = value; opt.textContent = text; select.appendChild(opt);
+                        }
+                        select.value = choices.some(x => x[0] === data[key]) ? data[key] : defaultValue;
+                        const targetSelect = document.createElement("select");
+                        targetSelect.style.cssText = select.style.cssText;
+                        if (targets) {
+                            const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "転用先を選択"; targetSelect.appendChild(placeholder);
+                            for (const t of targets) { const opt = document.createElement("option"); opt.value = String(t); opt.textContent = `S${t} へ転用`; targetSelect.appendChild(opt); }
+                            targetSelect.value = data[key.replace("subject_", "target_")] || "";
+                            targetSelect.onchange = () => { const d = retentionRead(); d[key.replace("subject_", "target_")] = targetSelect.value; retentionWrite(d); };
+                            const updateTarget = () => { targetSelect.style.display = select.value === "attribute_transfer" ? "block" : "none"; };
+                            select.addEventListener("change", updateTarget);
+                            updateTarget();
+                        }
+                        select.onchange = () => { const d = retentionRead(); d[key] = select.value; retentionWrite(d); };
+                        row.append(label, select);
+                        if (targets) row.appendChild(targetSelect);
+                        panel.appendChild(row);
+                    };
+                    const activeSubjects = [];
+                    for (let i = 1; i <= 5; i++) {
+                        if (charEnabledState[i] || String(wMap[`subject_def_${i}`]?.value || "").trim()) activeSubjects.push(i);
+                    }
+                    for (const i of activeSubjects) {
+                        const isChar = !!charEnabledState[i];
+                        const kind = isChar ? "人物" : (wMap[`subject_kind_${i}`]?.value || "オブジェクト");
+                        const name = isChar ? (wMap[`char${i}_name`]?.value || "キャラクター") : (String(wMap[`subject_def_${i}`]?.value || "").slice(0, 28));
+                        addChoice(`S${i}［${kind}］ ${name}`, `subject_${i}`, visual,
+                            kind === "背景" ? "partially_preserved" : "fully_preserved", activeSubjects.filter(n => n !== i));
+                    }
+                    const audioSet = new Set();
+                    for (const i of activeSubjects) {
+                        const raw = charEnabledState[i] ? String(wMap[`char${i}_audio`]?.value || "") : String(wMap[`subject_audio_${i}`]?.value || "");
+                        for (const match of raw.matchAll(/<Audio\s+([1-3])>/gi)) audioSet.add(match[1]);
+                    }
+                    for (const n of [...audioSet].sort()) addChoice(`A${n}［参照音声］`, `audio_${n}`, audio, "reference");
+                    if (!activeSubjects.length) {
+                        const empty = document.createElement("div"); empty.textContent = "定義済みの要素はありません。"; panel.appendChild(empty);
+                    }
+                    return panel;
+                };
                 const getV = (key, def) => clipData[key] !== undefined ? clipData[key] : def;
                 const setV = (key, val) => { clipData[key] = val; saveClipData(); };
 
@@ -768,10 +856,18 @@ app.registerExtension({
                     }
                 } catch (e) {}
                 
-                document.addEventListener("h3_seeds_updated", () => {
-                    try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) {}
-                    if (activeTab === "cache") renderTabContent();
-                });
+                const onH3SeedsUpdated = () => {
+                    if (h3Disposed || h3SeedRefreshPending) return;
+                    h3SeedRefreshPending = true;
+                    h3SeedRefreshFrame = requestAnimationFrame(() => {
+                        h3SeedRefreshPending = false;
+                        h3SeedRefreshFrame = null;
+                        if (h3Disposed) return;
+                        try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) {}
+                        if (activeTab === "cache") renderTabContent();
+                    });
+                };
+                document.addEventListener("h3_seeds_updated", onH3SeedsUpdated);
 
                 const root = document.createElement("div");
                 root.className = "h3-studio-container";
@@ -810,8 +906,8 @@ app.registerExtension({
                         }
                         renderTabContent();
                         
-                        if (node.size[0] < 720) {
-                            node.size[0] = 720;
+                        if (node.size[0] < H3_MIN_WIDTH) {
+                            node.size[0] = H3_MIN_WIDTH;
                             node.setDirtyCanvas(true, true);
                         }
                     };
@@ -874,10 +970,15 @@ app.registerExtension({
 
                     const onMouseUp = () => {
                         isDragging = false;
-                        window.removeEventListener("mousemove", onMouseMove);
-                        window.removeEventListener("mouseup", onMouseUp);
+                        if (h3DragCleanup) h3DragCleanup();
                     };
 
+                    if (h3DragCleanup) h3DragCleanup();
+                    h3DragCleanup = () => {
+                        window.removeEventListener("mousemove", onMouseMove);
+                        window.removeEventListener("mouseup", onMouseUp);
+                        h3DragCleanup = null;
+                    };
                     window.addEventListener("mousemove", onMouseMove);
                     window.addEventListener("mouseup", onMouseUp);
                 };
@@ -897,6 +998,31 @@ app.registerExtension({
 
                 fixedMediaArea.append(mediaResizerBar, mediaBody);
                 root.append(tabBar, contentArea, fixedMediaArea);
+
+                const convertSubjectNamesInTextarea = async (ta) => {
+                    if (!ta || ta.isComposing) return;
+                    const original = ta.value;
+                    const names = {};
+                    for (let i = 1; i <= 5; i++) {
+                        names[i] = String(charEnabledState[i]
+                            ? (wMap[`char${i}_name`]?.value || "")
+                            : (wMap[`subject_def_${i}`]?.value || "")).trim();
+                    }
+                    try {
+                        const response = await api.fetchApi("/h3/convert_subject_names", {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ text: original, names })
+                        });
+                        if (!response.ok) return;
+                        const result = await response.json();
+                        if (ta.value !== original || typeof result.text !== "string" || result.text === original) return;
+                        const oldStart = ta.selectionStart, oldEnd = ta.selectionEnd;
+                        ta.value = result.text;
+                        ta.dispatchEvent(new Event("input", { bubbles: true }));
+                        ta.focus();
+                        ta.setSelectionRange(Math.min(result.text.length, oldStart), Math.min(result.text.length, oldEnd));
+                    } catch (_) { /* Intentionally silent. */ }
+                };
 
                 const bindInput = (wName, label, isMultiline = false, placeholder = "") => {
                     const w = wMap[wName];
@@ -962,6 +1088,78 @@ app.registerExtension({
                             if (w.callback) w.callback(w.value);
                         };
                         el.onfocus = () => { lastFocusedInput = el; };
+                    }
+                    const chipConfig = {
+                        overall_story: [5, 0],
+                        quality_control: [5, 3],
+                        ambient_sound: [0, 3],
+                        bgm: [0, 3]
+                    };
+                    if (chipConfig[wName] && (el.tagName === "TEXTAREA" || el.type === "text")) {
+                        const [subjects, audios] = chipConfig[wName];
+                        const bar = document.createElement("div");
+                        bar.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:3px 0 6px;";
+                        let savedStart = String(el.value).length;
+                        let savedEnd = savedStart;
+                        const rememberCaret = () => {
+                            if (typeof el.selectionStart === "number") {
+                                savedStart = el.selectionStart;
+                                savedEnd = el.selectionEnd;
+                            }
+                        };
+                        el.addEventListener("click", rememberCaret);
+                        el.addEventListener("keyup", rememberCaret);
+                        el.addEventListener("select", rememberCaret);
+                        el.addEventListener("blur", rememberCaret);
+                        const addChip = (prefix, n, tag, color) => {
+                            const button = document.createElement("button");
+                            button.type = "button";
+                            button.textContent = `${prefix}${n}`;
+                            button.title = `カーソル位置に ${tag} を挿入`;
+                            button.style.cssText = `font-size:10px;padding:3px 7px;border-radius:5px;border:1px solid #555;background:#242424;color:${color};cursor:pointer;`;
+                            button.addEventListener("mousedown", e => e.preventDefault());
+                            button.addEventListener("click", () => {
+                                if (el.isComposing || composing) return;
+                                const start = document.activeElement === el ? el.selectionStart : savedStart;
+                                const end = document.activeElement === el ? el.selectionEnd : savedEnd;
+                                const a = Math.max(0, Math.min(start ?? el.value.length, el.value.length));
+                                const b = Math.max(a, Math.min(end ?? a, el.value.length));
+                                el.value = el.value.slice(0, a) + tag + el.value.slice(b);
+                                const pos = a + tag.length;
+                                el.focus();
+                                el.setSelectionRange(pos, pos);
+                                savedStart = savedEnd = pos;
+                                el.dispatchEvent(new Event("input", { bubbles: true }));
+                            });
+                            bar.appendChild(button);
+                        };
+                        let composing = false;
+                        el.addEventListener("compositionstart", () => { composing = true; });
+                        el.addEventListener("compositionend", () => { composing = false; rememberCaret(); });
+                        for (let n = 1; n <= subjects; n++) addChip("S", n, `<Subject ${n}>`, "#a6caff");
+                        if (subjects && audios) {
+                            const sep = document.createElement("span");
+                            sep.textContent = "│";
+                            sep.style.color = "#666";
+                            bar.appendChild(sep);
+                        }
+                        for (let n = 1; n <= audios; n++) addChip("A", n, `<Audio ${n}>`, "#89d9ac");
+                        if (wName === "overall_story") {
+                            const convertBtn = document.createElement("button");
+                            convertBtn.type = "button";
+                            convertBtn.className = "h3-tag-btn";
+                            convertBtn.textContent = "コード変換";
+                            convertBtn.title = "定義した名前を <Subject X> に変換";
+                            convertBtn.style.marginLeft = "auto";
+                            convertBtn.addEventListener("mousedown", e => e.preventDefault());
+                            convertBtn.onclick = e => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (!composing) convertSubjectNamesInTextarea(el);
+                            };
+                            bar.appendChild(convertBtn);
+                        }
+                        row.appendChild(bar);
                     }
                     row.appendChild(el);
                     return row;
@@ -1064,51 +1262,72 @@ app.registerExtension({
                 const createQuickTagButtons = (actionRow, prefix) => {
                     const bar = document.createElement("div");
                     bar.className = "h3-tag-btn-bar";
-
-                    const insertTag = (tag) => {
-                        const ta = actionRow.querySelector("textarea");
-                        const w = wMap[`${prefix}_action`];
-                        if (!ta) return;
-
-                        const cur = ta.value || "";
-                        const spacer = (cur.length > 0 && !cur.endsWith(" ") && !cur.endsWith("\n")) ? " " : "";
-                        ta.value = cur + spacer + tag + " ";
-
-                        if (w) {
-                            w.value = ta.value;
-                            if (w.callback) w.callback(w.value);
+                    const ta = actionRow.querySelector("textarea");
+                    const w = wMap[`${prefix}_action`];
+                    let savedStart = ta?.value.length || 0;
+                    let savedEnd = savedStart;
+                    let composing = false;
+                    const rememberCaret = () => {
+                        if (ta && typeof ta.selectionStart === "number") {
+                            savedStart = ta.selectionStart;
+                            savedEnd = ta.selectionEnd;
                         }
-                        ta.focus();
                     };
-
+                    if (ta) {
+                        ta.addEventListener("click", rememberCaret);
+                        ta.addEventListener("keyup", rememberCaret);
+                        ta.addEventListener("select", rememberCaret);
+                        ta.addEventListener("blur", rememberCaret);
+                        ta.addEventListener("compositionstart", () => { composing = true; });
+                        ta.addEventListener("compositionend", () => { composing = false; rememberCaret(); });
+                    }
+                    const insertTag = (tag) => {
+                        if (!ta || composing) return;
+                        const start = document.activeElement === ta ? ta.selectionStart : savedStart;
+                        const end = document.activeElement === ta ? ta.selectionEnd : savedEnd;
+                        const a = Math.max(0, Math.min(start ?? ta.value.length, ta.value.length));
+                        const b = Math.max(a, Math.min(end ?? a, ta.value.length));
+                        ta.value = ta.value.slice(0, a) + tag + ta.value.slice(b);
+                        const pos = a + tag.length;
+                        ta.focus();
+                        ta.setSelectionRange(pos, pos);
+                        savedStart = savedEnd = pos;
+                        ta.dispatchEvent(new Event("input", { bubbles: true }));
+                    };
                     for (let s = 1; s <= 5; s++) {
                         const btn = document.createElement("button");
                         btn.type = "button";
                         btn.className = "h3-tag-btn";
                         btn.textContent = `S${s}`;
-                        btn.title = `<subject: ${s}> をアクションの末尾に挿入`;
-                        btn.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            insertTag(`<subject: ${s}>`);
-                        };
+                        btn.title = `<Subject ${s}> をカーソル位置に挿入`;
+                        btn.addEventListener("mousedown", e => e.preventDefault());
+                        btn.onclick = e => { e.preventDefault(); e.stopPropagation(); insertTag(`<Subject ${s}>`); };
                         bar.appendChild(btn);
                     }
-
                     for (let a = 1; a <= 3; a++) {
                         const btn = document.createElement("button");
                         btn.type = "button";
                         btn.className = "h3-tag-btn audio-tag";
                         btn.textContent = `A${a}`;
-                        btn.title = `<Audio ${a}> をアクションの末尾に挿入`;
-                        btn.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            insertTag(`<Audio ${a}>`);
-                        };
+                        btn.title = `<Audio ${a}> をカーソル位置に挿入`;
+                        btn.addEventListener("mousedown", e => e.preventDefault());
+                        btn.onclick = e => { e.preventDefault(); e.stopPropagation(); insertTag(`<Audio ${a}>`); };
                         bar.appendChild(btn);
                     }
 
+                    const convertBtn = document.createElement("button");
+                    convertBtn.type = "button";
+                    convertBtn.className = "h3-tag-btn";
+                    convertBtn.textContent = "コード変換";
+                    convertBtn.title = "定義した名前を <Subject X> に置換（完全一致のみ）";
+                    convertBtn.style.marginLeft = "auto";
+                    convertBtn.addEventListener("mousedown", e => e.preventDefault());
+                    convertBtn.onclick = e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (!composing) convertSubjectNamesInTextarea(ta);
+                    };
+                    bar.appendChild(convertBtn);
                     return bar;
                 };
 
@@ -1380,11 +1599,109 @@ app.registerExtension({
                         }
 
                     } else if (activeTab === "scene") {
+                        const subjectBox = document.createElement("div");
+                        subjectBox.className = "h3-char-card";
+                        const subjectTitle = document.createElement("div");
+                        subjectTitle.className = "h3-char-title";
+                        subjectTitle.textContent = "主題定義（subject_definitions）";
+                        subjectBox.appendChild(subjectTitle);
+                        for (let i = 1; i <= 5; i++) {
+                            const locked = !!charEnabledState[i];
+                            const row = document.createElement("div");
+                            row.className = "h3-field-row";
+                            const header = document.createElement("div");
+                            header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;";
+                            const label = document.createElement("label");
+                            label.textContent = `S${i} ${locked ? "🔒 キャラクター設定で使用中" : "自由入力（空欄なら定義なし）"}`;
+                            header.appendChild(label);
+                            const kindWidget = wMap[`subject_kind_${i}`];
+                            const kindSelect = document.createElement("select");
+                            kindSelect.title = "Subjectの種類";
+                            kindSelect.style.cssText = "font-size:11px;padding:2px 4px;border-radius:4px;background:#252525;color:#eee;border:1px solid #555;";
+                            for (const kind of ["人物", "背景", "オブジェクト"]) {
+                                const opt = document.createElement("option");
+                                opt.value = kind; opt.textContent = kind;
+                                kindSelect.appendChild(opt);
+                            }
+                            kindSelect.value = locked ? "人物" : (kindWidget?.value || "オブジェクト");
+                            kindSelect.disabled = locked;
+                            kindSelect.onchange = () => {
+                                if (kindWidget) { kindWidget.value = kindSelect.value; if (kindWidget.callback) kindWidget.callback(kindWidget.value); }
+                            };
+                            header.appendChild(kindSelect);
+                            if (!locked) {
+                                const mediaButtons = document.createElement("div");
+                                mediaButtons.style.cssText = "display:flex;align-items:center;gap:2px;flex-wrap:wrap;justify-content:flex-end;";
+                                const makeButtons = (kind, count, prefix, tagName, activeColor) => {
+                                    const widget = wMap[`subject_${kind}_${i}`];
+                                    const selected = new Set((String(widget?.value || "").match(new RegExp(`<${tagName}\\s+\\d+>`, "gi")) || []).map(s => s.toLowerCase()));
+                                    for (let n = 1; n <= count; n++) {
+                                        const tag = `<${tagName} ${n}>`;
+                                        const btn = document.createElement("button");
+                                        btn.type = "button";
+                                        btn.textContent = `${prefix}${n}`;
+                                        btn.title = tag;
+                                        btn.style.cssText = "font-size:9px;padding:2px 4px;border-radius:4px;cursor:pointer;min-width:23px;line-height:1.4;";
+                                        const refresh = () => {
+                                            const on = selected.has(tag.toLowerCase());
+                                            btn.style.background = on ? activeColor : "#242424";
+                                            btn.style.color = on ? "#fff" : "#aab0b9";
+                                            btn.style.border = on ? "1px solid #8bb4dc" : "1px solid #444";
+                                        };
+                                        refresh();
+                                        btn.onclick = (e) => {
+                                            e.stopPropagation();
+                                            if (!widget) return;
+                                            const key = tag.toLowerCase();
+                                            if (selected.has(key)) selected.delete(key); else selected.add(key);
+                                            widget.value = Array.from(selected).map(t => {
+                                                const m = t.match(/(\d+)/);
+                                                return `<${tagName} ${m[1]}>`;
+                                            }).sort((a,b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).join(", ");
+                                            if (widget.callback) widget.callback(widget.value);
+                                            refresh();
+                                        };
+                                        mediaButtons.appendChild(btn);
+                                    }
+                                };
+                                makeButtons("pics", 9, "P", "Picture", "#1769aa");
+                                const separator = document.createElement("span");
+                                separator.textContent = "│";
+                                separator.style.color = "#666";
+                                mediaButtons.appendChild(separator);
+                                makeButtons("audio", 3, "A", "Audio", "#176c4b");
+                                header.appendChild(mediaButtons);
+                            }
+                            const input = document.createElement("textarea");
+                            input.rows = 1;
+                            input.className = "h3-prompt-textarea";
+                            input.style.height = "34px";
+                            input.style.minHeight = "34px";
+                            input.style.resize = "none";
+                            input.style.overflowY = "hidden";
+                            input.disabled = locked;
+                            if (locked) {
+                                const name = wMap[`char${i}_name`]?.value?.trim() || `キャラ${i}`;
+                                input.value = `S${i}は${name}で定義されています。`;
+                                input.style.opacity = "0.55";
+                            } else {
+                                input.value = wMap[`subject_def_${i}`]?.value || "";
+                                input.placeholder = "例：木々に囲まれた古い木造小屋";
+                                input.oninput = () => {
+                                    const w = wMap[`subject_def_${i}`];
+                                    if (w) { w.value = input.value; if (w.callback) w.callback(w.value); }
+                                };
+                            }
+                            row.append(header, input);
+                            subjectBox.appendChild(row);
+                        }
+                        contentArea.appendChild(subjectBox);
                         contentArea.append(
-                            bindInput("situation", "シチュエーション＆世界観", true, "舞台の場所、時間帯、天候、シーン全体の状況や空気感を入力"),
-                            bindInput("quality_control", "禁止事項＆スタイル維持", true, "崩れ防止、画風維持、3D化禁止などのネガティブ・クオリティ指示を入力"),
-                            bindInput("ambient_sound", "環境音 (Foley)", false, "足音、風の音、ドアの開閉音、雨音などの環境音・効果音を入力"),
-                            bindInput("bgm", "BGM (劇伴音楽)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
+                            bindInput("overall_story", "全体のあらすじ（summary）", true, "場所・時間帯・登場人物・出来事・物語の流れを日本語で入力（LLMが英訳）"),
+                            bindInput("quality_control", "禁止事項＆スタイル維持（retention_analysis）", true, "崩れ防止、画風維持、3D化禁止などのネガティブ・クオリティ指示を入力"),
+                            createRetentionSettings(),
+                            bindInput("ambient_sound", "環境音 (overall_soundscape)", false, "足音、風の音、ドアの開閉音、雨音などの環境音・効果音を入力"),
+                            bindInput("bgm", "BGM (non_diegetic_music)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
                         );
 
                     } else if (activeTab === "clip") {
@@ -1735,7 +2052,7 @@ app.registerExtension({
                             execBtn.innerHTML = `<span>⏳ シナリオ考案中... (LLM通信中)</span>`;
 
                             const payload = {};
-                            node.widgets.forEach(w => {
+                            (node.widgets || []).forEach(w => {
                                 payload[w.name] = w.value;
                             });
 
@@ -1931,7 +2248,7 @@ app.registerExtension({
                             baseSingleBtn.textContent = "⏳ 構築中...";
                             
                             const payload = { target_clip: "base" };
-                            node.widgets.forEach(w => { payload[w.name] = w.value; });
+                            (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
                             try {
                                 const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
                                 Object.assign(payload, parsed);
@@ -2051,7 +2368,7 @@ app.registerExtension({
                                         singleBtn.textContent = "⏳ 構築中...";
                                         
                                         const payload = { target_clip: i };
-                                        node.widgets.forEach(w => { payload[w.name] = w.value; });
+                                        (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
                                         try {
                                             const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
                                             Object.assign(payload, parsed);
@@ -2102,7 +2419,7 @@ app.registerExtension({
                             genBtn.innerHTML = `<span>⏳ プロンプト構築中... (LLM通信中)</span>`;
 
                             const payload = {};
-                            node.widgets.forEach(w => { payload[w.name] = w.value; });
+                            (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
 
                             for (let i = 1; i <= 5; i++) payload[`char${i}_enabled`] = charEnabledState[i];
                             for (let i = 1; i <= 4; i++) payload[`shot${i}_enabled`] = shotEnabledState[i];
@@ -2293,7 +2610,7 @@ app.registerExtension({
                     const slotClass = isKeyframe ? "keyframe-slot" : `${laneType}-slot`;
                     slot.className = `h3-slot ${slotClass}`;
 
-                    const item = state.items.find(it => (it.laneType || it.type) === laneType && it.slot === slotIdx);
+                    const item = (Array.isArray(state?.items) ? state.items : []).find(it => (it.laneType || it.type) === laneType && it.slot === slotIdx);
 
                     const badge = document.createElement("span");
                     badge.className = "h3-slot-badge";
@@ -2425,19 +2742,19 @@ app.registerExtension({
                     });
                 }
 
-                node.setSize([720, 905]);
+                node.setSize([H3_MIN_WIDTH, H3_MIN_HEIGHT]);
 
                 const onResize = node.onResize;
                 node.onResize = function (size) {
-                    if (size[0] < 720) size[0] = 720;
-                    if (size[1] < 905) size[1] = 905;
-                    
+                    if (size[0] < H3_MIN_WIDTH) size[0] = H3_MIN_WIDTH;
+                    if (size[1] < H3_MIN_HEIGHT) size[1] = H3_MIN_HEIGHT;
+
+                    if (onResize) onResize.apply(this, arguments);
+
                     if (root) {
                         root.style.width = (size[0] - 20) + "px";
-                        root.style.height = (size[1] - 85) + "px"; 
+                        root.style.height = (size[1] - 85) + "px";
                     }
-                    
-                    if (onResize) onResize.apply(this, arguments);
                 };
 
                 renderTabContent();
@@ -2465,6 +2782,8 @@ app.registerExtension({
                             state = JSON.parse(wMap["timeline_data"].value);
                         }
                     } catch (e) {}
+                    if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+                    if (!Array.isArray(state.items)) state.items = [];
                     try {
                         if (wMap["auto_data"] && wMap["auto_data"].value) {
                             autoState = { ...autoState, ...JSON.parse(wMap["auto_data"].value) };
@@ -2484,13 +2803,22 @@ app.registerExtension({
                         }
                     }
                     
-                    if (node.size[0] < 720 || node.size[1] < 905) {
-                        node.setSize([Math.max(720, node.size[0]), Math.max(905, node.size[1])]);
+                    if (node.size[0] < H3_MIN_WIDTH || node.size[1] < H3_MIN_HEIGHT) {
+                        node.setSize([Math.max(H3_MIN_WIDTH, node.size[0]), Math.max(H3_MIN_HEIGHT, node.size[1])]);
                     }
                     if (root) {
                         root.style.width = (node.size[0] - 20) + "px";
                         root.style.height = (node.size[1] - 85) + "px";
                     }
+                };
+
+                const originalOnRemoved = node.onRemoved;
+                node.onRemoved = function (...args) {
+                    h3Disposed = true;
+                    document.removeEventListener("h3_seeds_updated", onH3SeedsUpdated);
+                    if (h3SeedRefreshFrame !== null) cancelAnimationFrame(h3SeedRefreshFrame);
+                    if (h3DragCleanup) h3DragCleanup();
+                    if (originalOnRemoved) return originalOnRemoved.apply(this, args);
                 };
             };
         }
