@@ -1,0 +1,67 @@
+HKMC-Nodes License
+
+Copyright (c) 2026 HKMC-AILab. All rights reserved.
+
+1. Permission to Use
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of HKMC-Nodes (the "Software") to use the Software for personal, educational, research, and commercial purposes, subject to the conditions of this License.
+
+No license fee is required for using the Software.
+
+2. Modification
+
+Users may view, study, and modify the source code of the Software for their own internal or private use.
+
+Modified versions may be used privately but may not be publicly distributed, published, or shared with third parties without prior written permission from the copyright holder.
+
+3. Redistribution Restrictions
+
+Without prior written permission from the copyright holder, the following activities are prohibited:
+
+Redistributing, republishing, or sharing the Software, in whole or in part.
+
+Distributing modified versions, forks, or derivative works of the Software.
+
+Selling, sublicensing, or otherwise commercially distributing the Software itself.
+
+Including or bundling the Software in another publicly distributed software package, product, or service.
+
+Uploading copies of the Software or its source code to third-party repositories, download sites, or distribution platforms.
+
+Users may share links to the official HKMC-Nodes repository.
+
+4. Generated Content
+
+Images, videos, audio, and other content generated using the Software may be used, published, modified, and monetized for personal or commercial purposes.
+
+This License does not impose additional restrictions on such generated content.
+
+Users are responsible for complying with the licenses and terms of any third-party models, software, or services used to generate the content.
+
+5. Third-Party Components
+
+This License applies only to the portions of the Software owned by HKMC-AILab.
+
+Third-party libraries, models, and other components remain subject to their respective licenses and terms.
+
+Nothing in this License overrides the rights or obligations established by applicable third-party licenses.
+
+6. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF OR INABILITY TO USE THE SOFTWARE, TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW.
+
+7. Termination
+
+Any rights granted under this License automatically terminate if the user violates its terms.
+
+Upon termination, the user must cease using the Software unless the copyright holder grants renewed permission.
+
+8. Contact and Permissions
+
+Requests for redistribution, publication of modified versions, or other permissions not expressly granted by this License must be submitted to the copyright holder through the official HKMC-Nodes GitHub repository.
+
+Official repository:
+
+https://github.com/hkmc-ailab/ComfyUI-HKMC-Nodes
