@@ -632,7 +632,7 @@ def build_and_generate_prompt(kwargs):
         prompt_result, flags=re.I,
     )
 
-    stage_text = ""  # Legacy Stage field retired; synopsis is the sole scene narrative.
+    stage_text = ""  
     story_text = summary_story
     explicit_tags = set(re.findall(r"<Subject\s+([1-5])>", stage_text + "\n" + story_text, re.I))
 
@@ -1314,6 +1314,216 @@ async def handle_generate_prompt(request):
         })
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+
+
+from pathlib import Path as _IroPath
+from uuid import uuid4 as _iro_uuid4
+import shutil as _iro_shutil
+
+
+_iro_module_dir = _IroPath(__file__).resolve().parent
+_iro_hkmc_root = next((p for p in (_iro_module_dir, *_iro_module_dir.parents)
+                       if "hkmc" in p.name.lower() and "node" in p.name.lower()), _iro_module_dir)
+_IRO_WORKFLOW = _iro_hkmc_root / "workflow" / "irodori_tts.json"
+_IRO_AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
+
+
+def _iro_workflow_nodes():
+    with _IRO_WORKFLOW.open("r", encoding="utf-8") as fh:
+        document = json.load(fh)
+    nodes = {n["type"]: n for n in document["nodes"]}
+    expected = ["kjranyone.IrodoriTTS.ModelLoader", "kjranyone.IrodoriTTS.ReferenceAudio",
+                "kjranyone.IrodoriTTS.Sampler", "kjranyone.IrodoriTTS.VoiceDesignConfig", "SaveAudioWav"]
+    absent = [name for name in expected if name not in nodes]
+    if absent:
+        raise ValueError("Irodori workflow nodes missing: " + ", ".join(absent))
+    return nodes
+
+
+def _iro_input_audio_files():
+    root = _IroPath(folder_paths.get_input_directory())
+    names = []
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix.lower() in _IRO_AUDIO_SUFFIXES:
+            names.append(path.relative_to(root).as_posix())
+    return sorted(names)
+
+
+def _iro_inputs(node):
+    
+    return dict(node.get("widgets_values_named") or {})
+
+
+def _iro_safe_input_audio(name):
+    root = _IroPath(folder_paths.get_input_directory()).resolve()
+    file_path = (root / str(name)).resolve()
+    if not file_path.is_relative_to(root) or not file_path.is_file() or file_path.suffix.lower() not in _IRO_AUDIO_SUFFIXES:
+        raise ValueError("Irodori reference audio not found in ComfyUI/input: " + str(name))
+    return file_path
+
+
+@PromptServer.instance.routes.get("/h3/irodori/options")
+async def h3_irodori_options(request):
+    try:
+        nodes = _iro_workflow_nodes()
+        return web.json_response({
+            "success": True,
+            "models": folder_paths.get_filename_list("checkpoints"),
+            "audio_files": _iro_input_audio_files(),
+            "defaults": {
+                "loader": _iro_inputs(nodes["kjranyone.IrodoriTTS.ModelLoader"]),
+                "reference": _iro_inputs(nodes["kjranyone.IrodoriTTS.ReferenceAudio"]),
+                "sampler": _iro_inputs(nodes["kjranyone.IrodoriTTS.Sampler"]),
+                "voice_design": _iro_inputs(nodes["kjranyone.IrodoriTTS.VoiceDesignConfig"]),
+            },
+        })
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=400)
+
+
+@PromptServer.instance.routes.post("/h3/irodori/prepare")
+async def h3_irodori_prepare(request):
+    """Turn the *stored* four-node UI workflow into a disposable ComfyUI API prompt.
+
+    Only ModelLoader / ReferenceAudio / Sampler settings are user-adjustable.
+    SaveAudioWav is an internal output sink; no separate workflow is opened.
+    """
+    try:
+        data = await request.json()
+        text = str(data.get("text", "")).strip()
+        if not text or len(text) > 3000:
+            raise ValueError("読み上げるセリフは1〜3000文字で指定してください。")
+        nodes = _iro_workflow_nodes()
+        loader = _iro_inputs(nodes["kjranyone.IrodoriTTS.ModelLoader"])
+        reference = _iro_inputs(nodes["kjranyone.IrodoriTTS.ReferenceAudio"])
+        sampler = _iro_inputs(nodes["kjranyone.IrodoriTTS.Sampler"])
+        voice_design = _iro_inputs(nodes["kjranyone.IrodoriTTS.VoiceDesignConfig"])
+        voice_design["caption"] = str(data.get("voice_design_caption", voice_design.get("caption", "")) or "").strip()
+        if len(voice_design["caption"]) > 4000:
+            raise ValueError("VoiceDesignの説明は4000文字以内にしてください。")
+        voice_design["max_caption_len"] = int(voice_design.get("max_caption_len", 0) or 0)
+        if not 0 <= voice_design["max_caption_len"] <= 4096:
+            raise ValueError("VoiceDesignのmax_caption_lenが不正です。")
+
+        model = str(data.get("model") or loader.get("model", ""))
+        if model not in folder_paths.get_filename_list("checkpoints"):
+            raise ValueError("モデルがcheckpointsフォルダにありません: " + model)
+        loader["model"] = model
+        for setting, allowed in {
+            "model_device": ("cuda", "cpu"), "codec_device": ("cuda", "cpu"),
+            "model_precision": ("fp32", "fp16", "bf16"),
+            "codec_precision": ("fp32", "fp16", "bf16"),
+            "runtime_cache_policy": ("offload_after_use", "keep_gpu", "unload_after_use"),
+        }.items():
+            if setting in data:
+                value = str(data[setting])
+                if value not in allowed:
+                    raise ValueError(setting + " value is invalid")
+                loader[setting] = value
+        
+
+        ref_file = str(data.get("reference_audio", reference.get("audio", "")) or "").strip()
+        if ref_file:
+            _iro_safe_input_audio(ref_file)
+        reference["audio"] = ref_file
+        reference["ref_latent"] = "None"
+        reference["ref_normalize_db"] = max(-60.0, min(0.0, float(data.get("ref_normalize_db", reference.get("ref_normalize_db", -16.0)))))
+        reference["max_ref_seconds"] = max(0.0, min(120.0, float(data.get("max_ref_seconds", reference.get("max_ref_seconds", 0.0)))))
+
+        sampler["text"] = text
+        sampler["seed"] = int(data.get("seed", sampler.get("seed", 0)))
+        sampler["seconds"] = float(data.get("seconds", sampler.get("seconds", 0)))
+        sampler["num_steps"] = int(data.get("num_steps", sampler.get("num_steps", 40)))
+        sampler["batch_size"] = 1  
+        if not (0 <= sampler["seed"] <= 2**63-1 and 0 <= sampler["seconds"] <= 120 and 1 <= sampler["num_steps"] <= 120):
+            raise ValueError("Seed、秒数、Stepsの値を確認してください。")
+        if "trim_tail" in data:
+            sampler["trim_tail"] = bool(data["trim_tail"])
+
+        
+        
+        loader_keys = ("model", "model_device", "model_precision", "codec_device", "codec_precision",
+                       "enable_watermark", "enable_silentcipher", "compile_model", "compile_dynamic",
+                       "runtime_cache_policy")
+        ref_keys = ("audio", "ref_latent", "ref_normalize_db", "max_ref_seconds")
+        sampler_keys = ("text", "seed", "seconds", "num_steps", "batch_size", "decode_mode",
+                        "context_kv_cache", "max_text_len", "trim_tail")
+        if not ref_file:
+            ref_inputs = None
+        else:
+            ref_inputs = {key: reference[key] for key in ref_keys}
+        sampler_inputs = {key: sampler[key] for key in sampler_keys}
+        sampler_inputs["model_config"] = ["1", 0]
+        sampler_inputs["voice_design_config"] = ["5", 0]
+        if ref_inputs is not None:
+            sampler_inputs["ref_config"] = ["3", 0]
+        prefix = "h3_irodori/" + _iro_uuid4().hex
+        prompt = {
+            "1": {"class_type": "kjranyone.IrodoriTTS.ModelLoader", "inputs": {k: loader[k] for k in loader_keys}},
+            "2": {"class_type": "kjranyone.IrodoriTTS.Sampler", "inputs": sampler_inputs},
+            "4": {"class_type": "SaveAudioWav", "inputs": {"audio": ["2", 0], "filename_prefix": prefix}},
+            "5": {"class_type": "kjranyone.IrodoriTTS.VoiceDesignConfig", "inputs": {"caption": voice_design["caption"], "max_caption_len": voice_design["max_caption_len"]}},
+        }
+        if ref_inputs is not None:
+            prompt["3"] = {"class_type": "kjranyone.IrodoriTTS.ReferenceAudio", "inputs": ref_inputs}
+        return web.json_response({"success": True, "prompt": prompt, "output_node": "4"})
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=400)
+
+
+@PromptServer.instance.routes.post("/h3/irodori/attach")
+async def h3_irodori_attach(request):
+    """Make completed output WAV available to the existing HKMC AUDIO slots."""
+    try:
+        data = await request.json()
+        basename = str(data.get("filename", ""))
+        subfolder = str(data.get("subfolder", ""))
+        file_type = str(data.get("type", "output"))
+        if file_type != "output" or subfolder.replace("\\", "/").strip("/") != "h3_irodori":
+            raise ValueError("Unexpected Irodori output directory")
+        if not basename or basename != _IroPath(basename).name or not basename.lower().endswith(".wav"):
+            raise ValueError("Unexpected Irodori output WAV filename")
+        source_root = _IroPath(folder_paths.get_output_directory()).resolve()
+        source = (source_root / "h3_irodori" / basename).resolve()
+        if not source.is_relative_to(source_root) or not source.is_file():
+            raise FileNotFoundError("Irodori output WAV not found")
+        input_root = _IroPath(folder_paths.get_input_directory()).resolve()
+        
+        
+        raw_name = str(data.get("name", "")).strip()
+        if raw_name.lower().endswith(".wav"):
+            raw_name = raw_name[:-4]
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
+        if not safe_name or len(safe_name) > 80:
+            raise ValueError("保存名は1〜80文字で入力してください。")
+        if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", safe_name, re.IGNORECASE):
+            raise ValueError("Windowsの予約名は使えません。")
+        dest_dir = input_root / "h3_irodori"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        
+        for number in range(1, 10000):
+            suffix = "" if number == 1 else f"_{number}"
+            dest = dest_dir / f"{safe_name}{suffix}.wav"
+            try:
+                with dest.open("xb") as output_f:
+                    try:
+                        with source.open("rb") as input_f:
+                            _iro_shutil.copyfileobj(input_f, output_f)
+                    except Exception:
+                        output_f.close()
+                        dest.unlink(missing_ok=True)
+                        raise
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise ValueError("同名ファイルが多すぎます。別の名前を指定してください。")
+        return web.json_response({"success": True, "input_name": "h3_irodori/" + dest.name})
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=400)
+
 
 
 class H3PromptDirectorGUI:

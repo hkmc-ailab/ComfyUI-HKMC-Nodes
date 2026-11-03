@@ -1,0 +1,600 @@
+{
+  "id": "c9c9f182-4b9c-4855-9e89-2bcea50aeb07",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "kjranyone.IrodoriTTS.ModelLoader",
+      "pos": [
+        -4799.18281575346,
+        5129.253997704115
+      ],
+      "size": [
+        289.0244452660281,
+        274
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "COMBO",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model_device",
+          "name": "model_device",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_device"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model_precision",
+          "name": "model_precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_precision"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "codec_device",
+          "name": "codec_device",
+          "type": "COMBO",
+          "widget": {
+            "name": "codec_device"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "codec_precision",
+          "name": "codec_precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "codec_precision"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "enable_watermark",
+          "name": "enable_watermark",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enable_watermark"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "enable_silentcipher",
+          "name": "enable_silentcipher",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enable_silentcipher"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "compile_model",
+          "name": "compile_model",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "compile_model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "compile_dynamic",
+          "name": "compile_dynamic",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "compile_dynamic"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "runtime_cache_policy",
+          "name": "runtime_cache_policy",
+          "type": "COMBO",
+          "widget": {
+            "name": "runtime_cache_policy"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "irodori_model_config",
+          "name": "irodori_model_config",
+          "type": "IRODORI_MODEL_CONFIG",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "kjranyone.IrodoriTTS.ModelLoader"
+      },
+      "widgets_values": [
+        "Irodori-TTS-v4.1-Anime.safetensors",
+        "cuda",
+        "fp32",
+        "cuda",
+        "fp32",
+        false,
+        false,
+        false,
+        false,
+        "offload_after_use"
+      ],
+      "widgets_values_named": {
+        "model": "Irodori-TTS-v4.1-Anime.safetensors",
+        "model_device": "cuda",
+        "model_precision": "fp32",
+        "codec_device": "cuda",
+        "codec_precision": "fp32",
+        "enable_watermark": false,
+        "enable_silentcipher": false,
+        "compile_model": false,
+        "compile_dynamic": false,
+        "runtime_cache_policy": "offload_after_use"
+      }
+    },
+    {
+      "id": 2,
+      "type": "kjranyone.IrodoriTTS.Sampler",
+      "pos": [
+        -4498.933085128195,
+        5130.286989622151
+      ],
+      "size": [
+        400,
+        464
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "irodori_model_config",
+          "name": "model_config",
+          "type": "IRODORI_MODEL_CONFIG",
+          "link": 1
+        },
+        {
+          "localized_name": "lora_stack",
+          "name": "lora_stack",
+          "shape": 7,
+          "type": "IRODORI_LORA_STACK",
+          "link": null
+        },
+        {
+          "localized_name": "ref_config",
+          "name": "ref_config",
+          "shape": 7,
+          "type": "IRODORI_REF_CONFIG",
+          "link": 2
+        },
+        {
+          "localized_name": "voice_design_config",
+          "name": "voice_design_config",
+          "shape": 7,
+          "type": "IRODORI_VOICE_DESIGN_CONFIG",
+          "link": 4
+        },
+        {
+          "localized_name": "cfg_config",
+          "name": "cfg_config",
+          "shape": 7,
+          "type": "IRODORI_CFG_CONFIG",
+          "link": null
+        },
+        {
+          "localized_name": "duration_config",
+          "name": "duration_config",
+          "shape": 7,
+          "type": "IRODORI_DURATION_CONFIG",
+          "link": null
+        },
+        {
+          "localized_name": "rescale_config",
+          "name": "rescale_config",
+          "shape": 7,
+          "type": "IRODORI_RESCALE_CONFIG",
+          "link": null
+        },
+        {
+          "localized_name": "schedule_config",
+          "name": "schedule_config",
+          "shape": 7,
+          "type": "IRODORI_SCHEDULE_CONFIG",
+          "link": null
+        },
+        {
+          "localized_name": "trim_tail_config",
+          "name": "trim_tail_config",
+          "shape": 7,
+          "type": "IRODORI_TRIM_TAIL_CONFIG",
+          "link": null
+        },
+        {
+          "localized_name": "text",
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "seconds",
+          "name": "seconds",
+          "type": "FLOAT",
+          "widget": {
+            "name": "seconds"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "num_steps",
+          "name": "num_steps",
+          "type": "INT",
+          "widget": {
+            "name": "num_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "batch_size",
+          "name": "batch_size",
+          "type": "INT",
+          "widget": {
+            "name": "batch_size"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "decode_mode",
+          "name": "decode_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "decode_mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "context_kv_cache",
+          "name": "context_kv_cache",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "context_kv_cache"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "max_text_len",
+          "name": "max_text_len",
+          "type": "INT",
+          "widget": {
+            "name": "max_text_len"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "trim_tail",
+          "name": "trim_tail",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "trim_tail"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "kjranyone.IrodoriTTS.Sampler"
+      },
+      "widgets_values": [
+        "",
+        0,
+        "randomize",
+        0,
+        40,
+        1,
+        "sequential",
+        true,
+        0,
+        true
+      ],
+      "widgets_values_named": {
+        "text": "",
+        "seed": 0,
+        "control_after_generate": "randomize",
+        "seconds": 0,
+        "num_steps": 40,
+        "batch_size": 1,
+        "decode_mode": "sequential",
+        "context_kv_cache": true,
+        "max_text_len": 0,
+        "trim_tail": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "kjranyone.IrodoriTTS.ReferenceAudio",
+      "pos": [
+        -4797.895801129809,
+        4862.785232477463
+      ],
+      "size": [
+        286.9132234105149,
+        208
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "prev",
+          "name": "prev",
+          "shape": 7,
+          "type": "IRODORI_REF_CONFIG",
+          "link": null
+        },
+        {
+          "localized_name": "audio",
+          "name": "audio",
+          "type": "COMBO",
+          "widget": {
+            "name": "audio"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "ref_latent",
+          "name": "ref_latent",
+          "type": "COMBO",
+          "widget": {
+            "name": "ref_latent"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "ref_normalize_db",
+          "name": "ref_normalize_db",
+          "type": "FLOAT",
+          "widget": {
+            "name": "ref_normalize_db"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "max_ref_seconds",
+          "name": "max_ref_seconds",
+          "type": "FLOAT",
+          "widget": {
+            "name": "max_ref_seconds"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "audioUI",
+          "name": "audioUI",
+          "shape": 7,
+          "type": "AUDIO_UI",
+          "widget": {
+            "name": "audioUI"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "upload",
+          "name": "upload",
+          "shape": 7,
+          "type": "AUDIOUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "irodori_ref_config",
+          "name": "irodori_ref_config",
+          "type": "IRODORI_REF_CONFIG",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "kjranyone.IrodoriTTS.ReferenceAudio"
+      },
+      "widgets_values": [
+        "04.mp3",
+        "None",
+        -16,
+        0,
+        ""
+      ],
+      "widgets_values_named": {
+        "audio": "04.mp3",
+        "ref_latent": "None",
+        "ref_normalize_db": -16,
+        "max_ref_seconds": 0,
+        "upload": ""
+      }
+    },
+    {
+      "id": 4,
+      "type": "SaveAudioWav",
+      "pos": [
+        -4063.957834865049,
+        5129.262750642051
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 3
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveAudioWav"
+      },
+      "widgets_values": [
+        "audio/ComfyUI"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "audio/ComfyUI"
+      }
+    },
+    {
+      "id": 5,
+      "type": "kjranyone.IrodoriTTS.VoiceDesignConfig",
+      "pos": [
+        -4800.489619590333,
+        5460.12946861673
+      ],
+      "size": [
+        290.15868189695993,
+        209.66000360825
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "caption",
+          "name": "caption",
+          "type": "STRING",
+          "widget": {
+            "name": "caption"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "max_caption_len",
+          "name": "max_caption_len",
+          "type": "INT",
+          "widget": {
+            "name": "max_caption_len"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "irodori_voice_design_config",
+          "name": "irodori_voice_design_config",
+          "type": "IRODORI_VOICE_DESIGN_CONFIG",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "kjranyone.IrodoriTTS.VoiceDesignConfig"
+      },
+      "widgets_values": [
+        "",
+        0
+      ],
+      "widgets_values_named": {
+        "caption": "",
+        "max_caption_len": 0
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IRODORI_MODEL_CONFIG"
+    ],
+    [
+      2,
+      3,
+      0,
+      2,
+      2,
+      "IRODORI_REF_CONFIG"
+    ],
+    [
+      3,
+      2,
+      0,
+      4,
+      0,
+      "AUDIO"
+    ],
+    [
+      4,
+      5,
+      0,
+      2,
+      3,
+      "IRODORI_VOICE_DESIGN_CONFIG"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 2.357947691000004,
+      "offset": [
+        4889.10620534761,
+        -5285.916792168426
+      ]
+    }
+  },
+  "version": 0.4
+}
