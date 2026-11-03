@@ -1,6 +1,15 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+function h3ParseClipSettings(value) {
+    try {
+        const parsed = typeof value === "string" ? JSON.parse(value || "{}") : value;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
 if (!window._h3_gui_queue_hooked) {
     window._h3_gui_queue_hooked = true;
     const origToPrompt = app.graphToPrompt;
@@ -14,7 +23,7 @@ if (!window._h3_gui_queue_hooked) {
                 let jsonStr = node.inputs["clips_data_json"];
                 if (jsonStr) {
                     try {
-                        let data = JSON.parse(jsonStr);
+                        let data = h3ParseClipSettings(jsonStr);
                         if (!data.cache_settings) data.cache_settings = {};
                         
                         let hasChanged = false;
@@ -31,7 +40,7 @@ if (!window._h3_gui_queue_hooked) {
                                 if (gNode) {
                                     const w = gNode.widgets?.find(w => w.name === "clips_data_json");
                                     if (w) {
-                                        let wData = JSON.parse(w.value);
+                                        let wData = h3ParseClipSettings(w.value);
                                         if (!wData.cache_settings) wData.cache_settings = {};
                                         if (!wData.cache_settings[i]) wData.cache_settings[i] = { seed: -1, save_latent: false };
                                         wData.cache_settings[i].last_seed = newSeed;
@@ -45,7 +54,7 @@ if (!window._h3_gui_queue_hooked) {
                                 if (gNode) {
                                     const w = gNode.widgets?.find(w => w.name === "clips_data_json");
                                     if (w) {
-                                        let wData = JSON.parse(w.value);
+                                        let wData = h3ParseClipSettings(w.value);
                                         if (!wData.cache_settings) wData.cache_settings = {};
                                         if (!wData.cache_settings[i]) wData.cache_settings[i] = { seed: -1, save_latent: false };
                                         wData.cache_settings[i].last_seed = data.cache_settings[i].seed;
@@ -684,8 +693,7 @@ app.registerExtension({
                     if (w.inputEl) w.inputEl.style.display = "none";
                 });
 
-                let clipData = {};
-                try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) { clipData = {}; }
+                let clipData = h3ParseClipSettings(wMap["clips_data_json"]?.value);
 
                 const saveClipData = () => {
                     if (wMap["clips_data_json"]) {
@@ -776,8 +784,15 @@ app.registerExtension({
                     }
                     return panel;
                 };
-                const getV = (key, def) => clipData[key] !== undefined ? clipData[key] : def;
-                const setV = (key, val) => { clipData[key] = val; saveClipData(); };
+                const getV = (key, def) => {
+                    clipData = h3ParseClipSettings(clipData);
+                    return clipData[key] !== undefined ? clipData[key] : def;
+                };
+                const setV = (key, val) => {
+                    clipData = h3ParseClipSettings(clipData);
+                    clipData[key] = val;
+                    saveClipData();
+                };
 
 
                 for (let i = 1; i <= 5; i++) {
@@ -863,7 +878,7 @@ app.registerExtension({
                         h3SeedRefreshPending = false;
                         h3SeedRefreshFrame = null;
                         if (h3Disposed) return;
-                        try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) {}
+                        clipData = h3ParseClipSettings(wMap["clips_data_json"]?.value);
                         if (activeTab === "cache") renderTabContent();
                     });
                 };
@@ -885,8 +900,9 @@ app.registerExtension({
                     { id: "clip", label: "クリップ" },
                     { id: "auto", label: "おまかせ" },
                     { id: "llm", label: "LLM設定" },
+                    { id: "irodori", label: "Irodori-TTS" },
                     { id: "prompt", label: "プロンプト生成" },
-                    { id: "cache", label: "Seed/Latent管理" }
+                    { id: "cache", label: "管理" }
                 ];
 
                 const tabButtons = {};
@@ -899,7 +915,7 @@ app.registerExtension({
                         Object.values(tabButtons).forEach(b => b.classList.remove("active"));
                         btn.classList.add("active");
                         
-                        if (activeTab === "llm" || activeTab === "prompt" || activeTab === "cache") {
+                        if (activeTab === "llm" || activeTab === "irodori" || activeTab === "prompt" || activeTab === "cache") {
                             fixedMediaArea.style.display = "none";
                         } else {
                             fixedMediaArea.style.display = "flex";
@@ -1021,7 +1037,7 @@ app.registerExtension({
                         ta.dispatchEvent(new Event("input", { bubbles: true }));
                         ta.focus();
                         ta.setSelectionRange(Math.min(result.text.length, oldStart), Math.min(result.text.length, oldEnd));
-                    } catch (_) { /* Intentionally silent. */ }
+                    } catch (_) {  }
                 };
 
                 const bindInput = (wName, label, isMultiline = false, placeholder = "") => {
@@ -2058,7 +2074,7 @@ app.registerExtension({
 
                             try {
                                 const controller = new AbortController();
-                                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10分待機
+                                const timeoutId = setTimeout(() => controller.abort(), 600000); 
 
                                 const res = await fetch("/h3/generate_auto_scenario", {
                                     method: "POST",
@@ -2135,6 +2151,376 @@ app.registerExtension({
                             }
                         };
 
+
+                    } else if (activeTab === "irodori") {
+                        const card = document.createElement("div");
+                        card.className = "h3-char-card";
+                        contentArea.appendChild(card);
+                        const title = document.createElement("div");
+                        title.className = "h3-char-title";
+                        title.textContent = "Irodori-TTS｜音声リファレンス生成";
+                        card.appendChild(title);
+                        const settings = getV("irodori_tts", {});
+                        const makeRow = (labelText, element) => {
+                            const row = document.createElement("div");
+                            row.className = "h3-field-row";
+                            const label = document.createElement("label");
+                            label.textContent = labelText;
+                            row.append(label, element);
+                            card.appendChild(row);
+                            return element;
+                        };
+                        const styleControl = el => {
+                            el.style.cssText = "width:100%;box-sizing:border-box;background:#202020;color:#eee;border:1px solid #4a4a4a;border-radius:6px;padding:8px;font-size:12px;";
+                            return el;
+                        };
+                        const makeSelect = (value, options) => {
+                            const el = styleControl(document.createElement("select"));
+                            for (const [id, text] of options) {
+                                const option = document.createElement("option");
+                                option.value = id; option.textContent = text;
+                                el.appendChild(option);
+                            }
+                            el.value = String(value ?? "");
+                            return el;
+                        };
+                        const makeNumber = (value, min, max, step = 1) => {
+                            const el = styleControl(document.createElement("input"));
+                            el.type = "number"; el.min = min; el.max = max; el.step = step;
+                            el.value = value;
+                            return el;
+                        };
+                        const store = (key, value) => {
+                            const d = { ...getV("irodori_tts", {}), [key]: value };
+                            setV("irodori_tts", d);
+                        };
+                        const modelSelect = makeSelect(settings.model || "", []);
+                        makeRow("モデルを読み込む｜参照先：📁ComfyUI/models/checkpoints", modelSelect);
+                        modelSelect.onchange = () => store("model", modelSelect.value);
+                        const sources = [["manual", "手動入力"]];
+                        for (let s = 1; s <= 4; s++) {
+                            const w = wMap[`shot${s}_dialogue`];
+                            if (shotEnabledState[s] && String(w?.value || "").trim()) {
+                                sources.push([`shot${s}`, `演出 ショット${s}｜${String(w.value).slice(0, 42)}`]);
+                            }
+                        }
+                        for (let c = 1; c <= 10; c++) {
+                            if (!clipEnabledState[c]) continue;
+                            for (let s = 1; s <= 4; s++) {
+                                const w = wMap[`c${c}_s${s}_dialogue`];
+                                if (clipShotEnabledState[c][s] && String(w?.value || "").trim()) {
+                                    sources.push([`c${c}_s${s}`, `クリップ${c} ショット${s}｜${String(w.value).slice(0, 34)}`]);
+                                }
+                            }
+                        }
+                        const selectedSource = sources.some(([id]) => id === settings.source) ? settings.source : (sources[1]?.[0] || "manual");
+                        const sourceSelect = makeSelect(selectedSource, sources);
+                        makeRow("セリフの取得元", sourceSelect);
+                        const readSource = sourceId => {
+                            if (sourceId === "manual") return null;
+                            return String(wMap[`${sourceId}_dialogue`]?.value || "");
+                        };
+                        const textBox = styleControl(document.createElement("textarea"));
+                        textBox.rows = 3; textBox.style.resize = "vertical";
+                        textBox.placeholder = "Irodoriに読み上げさせるセリフ（H3側と同じ内容がおすすめ）";
+                        textBox.value = readSource(selectedSource) ?? (settings.text || "");
+                        makeRow("読み上げテキスト", textBox);
+                        sourceSelect.onchange = () => {
+                            store("source", sourceSelect.value);
+                            const fromSource = readSource(sourceSelect.value);
+                            if (fromSource !== null) textBox.value = fromSource;
+                        };
+                        textBox.oninput = () => {
+                            store("text", textBox.value);
+                            if (sourceSelect.value !== "manual") {
+                                sourceSelect.value = "manual";
+                                store("source", "manual");
+                            }
+                        };
+                        const voiceDesign = styleControl(document.createElement("textarea"));
+                        voiceDesign.rows = 2;
+                        voiceDesign.style.resize = "vertical";
+                        voiceDesign.placeholder = "声質・話速・感情・話し方などを指定";
+                        voiceDesign.value = settings.voice_design_caption ?? "";
+                        makeRow("ボイスデザイン｜声質", voiceDesign);
+                        voiceDesign.oninput = () => store("voice_design_caption", voiceDesign.value);
+                        const refSelect = makeSelect(settings.reference_audio || "", []);
+                        makeRow("音声リファレンス｜参照先：📁ComfyUI/input", refSelect);
+                        refSelect.onchange = () => store("reference_audio", refSelect.value);
+                        const refNorm = makeNumber(settings.ref_normalize_db ?? -16, -60, 0);
+                        makeRow("音声リファレンス｜音量 (dB)", refNorm);
+                        refNorm.onchange = () => store("ref_normalize_db", Number(refNorm.value));
+                        const maxRef = makeNumber(settings.max_ref_seconds ?? 0, 0, 120, 0.5);
+                        makeRow("音声リファレンス｜参照音声の最大秒数（0=既定）", maxRef);
+                        maxRef.onchange = () => store("max_ref_seconds", Number(maxRef.value));
+                        const steps = makeNumber(settings.num_steps ?? 40, 1, 120);
+                        makeRow("Sampler｜Steps", steps);
+                        steps.onchange = () => store("num_steps", Number(steps.value));
+                        const seed = makeNumber(settings.seed ?? 0, 0, 9223372036854775807);
+                        makeRow("Sampler｜Seed", seed);
+                        seed.onchange = () => store("seed", Math.floor(Number(seed.value)));
+                        const autoSeed = document.createElement("input");
+                        autoSeed.type = "checkbox";
+                        autoSeed.checked = settings.randomize_seed ?? true;
+                        autoSeed.onchange = () => store("randomize_seed", autoSeed.checked);
+                        const autoSeedLabel = document.createElement("label");
+                        autoSeedLabel.style.cssText = "display:flex;align-items:center;gap:8px;color:#eee;font-size:12px;";
+                        autoSeedLabel.append(autoSeed, document.createTextNode("再生成ごとにSeedを変更（オフで固定Seed）"));
+                        card.appendChild(autoSeedLabel);
+                        const seconds = makeNumber(settings.seconds ?? 0, 0, 120, 0.5);
+                        makeRow("Sampler｜秒数（0=自動）", seconds);
+                        seconds.onchange = () => store("seconds", Number(seconds.value));
+                        const trim = document.createElement("input");
+                        trim.type = "checkbox"; trim.checked = settings.trim_tail ?? true;
+                        trim.onchange = () => store("trim_tail", trim.checked);
+                        const trimLabel = document.createElement("label");
+                        trimLabel.style.cssText = "display:flex;align-items:center;gap:8px;color:#eee;font-size:12px;";
+                        trimLabel.append(trim, document.createTextNode("Sampler｜末尾の無音を除去"));
+                        card.appendChild(trimLabel);
+
+                        const status = document.createElement("div");
+                        status.style.cssText = "font-size:12px;color:#aab7c4;min-height:20px;white-space:pre-wrap;";
+                        card.appendChild(status);
+                        const gen = document.createElement("button");
+                        gen.className = "h3-btn-gen-prompt";
+                        gen.textContent = "🎙 音声生成";
+                        card.appendChild(gen);
+
+                        const previewPanel = document.createElement("div");
+                        previewPanel.style.cssText = "display:none;flex-direction:column;gap:10px;border:1px solid #4a4a4a;border-radius:8px;padding:12px;background:#17191b;";
+                        card.appendChild(previewPanel);
+                        const previewHeading = document.createElement("div");
+                        previewHeading.className = "h3-char-title";
+                        previewHeading.textContent = "生成音声のプレビュー";
+                        previewPanel.appendChild(previewHeading);
+                        const preview = document.createElement("audio");
+                        preview.controls = true;
+                        preview.preload = "metadata";
+                        preview.style.cssText = "width:100%;";
+                        previewPanel.appendChild(preview);
+                        const volumeRow = document.createElement("div");
+                        volumeRow.style.cssText = "display:flex;align-items:center;gap:10px;font-size:12px;color:#dbe0e6;";
+                        const volumeLabel = document.createElement("span");
+                        volumeLabel.textContent = "🔊 試聴音量";
+                        const volume = document.createElement("input");
+                        volume.type = "range";
+                        volume.min = "0"; volume.max = "100"; volume.step = "1";
+                        volume.value = String(settings.preview_volume ?? 80);
+                        volume.style.cssText = "flex:1;min-width:0;accent-color:#007acc;";
+                        const volumeValue = document.createElement("span");
+                        volumeValue.style.minWidth = "38px";
+                        const updateVolume = () => {
+                            const v = Math.max(0, Math.min(100, Number(volume.value) || 0));
+                            preview.volume = v / 100;
+                            volumeValue.textContent = `${v}%`;
+                        };
+                        updateVolume();
+                        volume.oninput = () => { updateVolume(); store("preview_volume", Number(volume.value)); };
+                        volumeRow.append(volumeLabel, volume, volumeValue);
+                        previewPanel.appendChild(volumeRow);
+                        const saveSection = document.createElement("div");
+                        saveSection.style.cssText = "display:flex;flex-direction:column;gap:9px;border-top:1px solid #383c40;padding-top:12px;";
+                        previewPanel.appendChild(saveSection);
+                        const saveHeading = document.createElement("div");
+                        saveHeading.className = "h3-char-title";
+                        saveHeading.textContent = "気に入ったらスロットへ保存";
+                        saveSection.appendChild(saveHeading);
+                        const nameInput = styleControl(document.createElement("input"));
+                        nameInput.type = "text"; nameInput.maxLength = 80;
+                        nameInput.placeholder = "";
+                        nameInput.value = settings.save_name || "";
+                        nameInput.oninput = () => store("save_name", nameInput.value);
+                        const nameLabel = document.createElement("label");
+                        nameLabel.textContent = "保存ファイル名（.wavは自動付与）｜保存先：📁ComfyUI/input/h3_irodori";
+                        const nameRow = document.createElement("div");
+                        nameRow.className = "h3-field-row";
+                        nameRow.append(nameLabel, nameInput);
+                        saveSection.appendChild(nameRow);
+                        const voiceOptions = [["None", "話者を自動設定しない"]];
+                        for (let i = 1; i <= 5; i++) {
+                            voiceOptions.push([`S${i}`, `S${i}：${wMap[`char${i}_name`]?.value || "キャラクター"}`]);
+                        }
+                        const guessSpeaker = () => String(wMap[`${sourceSelect.value}_speaker`]?.value || "None");
+                        const speakerSelect = makeSelect(settings.speaker || guessSpeaker(), voiceOptions);
+                        const spRow = document.createElement("div");
+                        spRow.className = "h3-field-row";
+                        const spLabel = document.createElement("label");
+                        spLabel.textContent = "H3の話者（保存時にAudioタグを割り当て）";
+                        spRow.append(spLabel, speakerSelect);
+                        saveSection.appendChild(spRow);
+                        speakerSelect.onchange = () => store("speaker", speakerSelect.value);
+                        const targetSlot = makeSelect(settings.slot ?? 0, [[0,"A1"],[1,"A2"],[2,"A3"]]);
+                        const slotRow = document.createElement("div");
+                        slotRow.className = "h3-field-row";
+                        const slotLabel = document.createElement("label");
+                        slotLabel.textContent = "保存先";
+                        slotRow.append(slotLabel, targetSlot);
+                        saveSection.appendChild(slotRow);
+                        targetSlot.onchange = () => store("slot", Number(targetSlot.value));
+
+                        const saveBtn = document.createElement("button");
+                        saveBtn.className = "h3-btn-gen-prompt";
+                        saveBtn.textContent = "💾 スロットへ保存";
+                        saveSection.appendChild(saveBtn);
+                        const savedStatus = document.createElement("div");
+                        savedStatus.style.cssText = "font-size:12px;color:#aab7c4;white-space:pre-wrap;";
+                        saveSection.appendChild(savedStatus);
+                        const normalizeTake = take => {
+                            if (!take || typeof take !== "object") return null;
+                            if (take.type !== "output" || take.subfolder !== "h3_irodori" || !String(take.filename || "").toLowerCase().endsWith(".wav")) return null;
+                            return {filename:take.filename, subfolder:take.subfolder, type:"output"};
+                        };
+                        let pendingTake = normalizeTake(settings.pending_audio);
+                        const setPreview = take => {
+                            pendingTake = normalizeTake(take);
+                            if (!pendingTake) {
+                                preview.pause(); preview.removeAttribute("src"); preview.load();
+                                previewPanel.style.display = "none";
+                                return;
+                            }
+                            preview.src = `/view?filename=${encodeURIComponent(pendingTake.filename)}&subfolder=${encodeURIComponent(pendingTake.subfolder)}&type=output`;
+                            preview.volume = Number(volume.value) / 100;
+                            previewPanel.style.display = "flex";
+                        };
+                        setPreview(pendingTake);
+                        const fillSelect = (el, items, chosen) => {
+                            el.replaceChildren();
+                            for (const [id, label] of items) {
+                                const opt = document.createElement("option");
+                                opt.value = id; opt.textContent = label; el.appendChild(opt);
+                            }
+                            if (items.some(([id]) => id === chosen)) el.value = chosen;
+                            else if (items.length) el.value = items[0][0];
+                        };
+                        let optionsReady = false;
+                        (async () => {
+                            try {
+                                const resp = await api.fetchApi("/h3/irodori/options");
+                                const data = await resp.json();
+                                if (!resp.ok || !data.success) throw new Error(data.error || "設定を取得できません");
+                                if (!card.isConnected) return;
+                                fillSelect(modelSelect, (data.models || []).map(x => [x,x]), settings.model || data.defaults.loader.model);
+                                if (settings.voice_design_caption === undefined && !voiceDesign.value) {
+                                    voiceDesign.value = data.defaults.voice_design?.caption || "";
+                                }
+                                fillSelect(refSelect, (data.audio_files || []).map(x => [x,x]), settings.reference_audio || data.defaults.reference.audio);
+                                const refNone = document.createElement("option");
+                                refNone.value = ""; refNone.textContent = "参照なし"; refSelect.prepend(refNone);
+                                if (!refSelect.value) refSelect.value = "";
+                                optionsReady = true;
+                                status.textContent = pendingTake ? "前回生成した音声をプレビューできます。" : "準備完了。音声生成 → 試聴 → 名前を付けて保存、の順で操作できます。";
+                            } catch (e) { status.textContent = "初期化エラー: " + e.message; }
+                        })();
+                        gen.onclick = async () => {
+                            if (!optionsReady) { status.textContent = "Irodori設定を読み込み中です"; return; }
+                            const text = String(textBox.value).trim();
+                            if (!text) { status.textContent = "セリフを入力してね。"; return; }
+                            gen.disabled = true;
+                            saveBtn.disabled = true;
+                            const oldText = gen.textContent;
+                            gen.textContent = "生成中…";
+                            try {
+                                const requestBody = {
+                                    text, model: modelSelect.value, voice_design_caption: voiceDesign.value, reference_audio: refSelect.value,
+                                    ref_normalize_db: Number(refNorm.value), max_ref_seconds: Number(maxRef.value),
+                                    num_steps: Number(steps.value),
+                                    seed: autoSeed.checked ? Math.floor(Math.random() * 9007199254740990) + 1 : Math.floor(Number(seed.value)),
+                                    seconds: Number(seconds.value), trim_tail: trim.checked
+                                };
+                                const prep = await api.fetchApi("/h3/irodori/prepare", {
+                                    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(requestBody)
+                                });
+                                const prepared = await prep.json();
+                                if (!prep.ok || !prepared.success) throw new Error(prepared.error || "音声ワークフローの準備に失敗");
+                                status.textContent = "ComfyUIのキューに登録しています…";
+                                const queued = await api.fetchApi("/prompt", {
+                                    method: "POST", headers: {"Content-Type": "application/json"},
+                                    body: JSON.stringify({prompt: prepared.prompt, client_id: api.clientId})
+                                });
+                                const queuedJson = await queued.json();
+                                if (!queued.ok || !queuedJson.prompt_id) {
+                                    const nodeErrors = JSON.stringify(queuedJson.node_errors || {});
+                                    throw new Error((queuedJson.error || "キュー登録失敗") + " " + nodeErrors);
+                                }
+                                const promptId = queuedJson.prompt_id;
+                                const run = async () => {
+                                    const historyRes = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
+                                    if (!historyRes.ok) throw new Error("生成履歴の取得に失敗");
+                                    const history = await historyRes.json();
+                                    return history[promptId] || null;
+                                };
+                                let record = null;
+                                for (let attempt = 0; attempt < 600; attempt++) {
+                                    await new Promise(resolve => setTimeout(resolve, 1000));
+                                    record = await run();
+                                    if (record) break;
+                                    if (attempt % 5 === 0) status.textContent = `音声を生成中… (${Math.floor((attempt + 1) / 60)}分${(attempt + 1) % 60}秒)`;
+                                }
+                                if (!record) throw new Error("音声生成の確認がタイムアウトしました。ComfyUIの履歴を確認してください。");
+                                if (record.status?.status_str === "error" || record.status?.completed === false) {
+                                    const errors = (record.status?.messages || []).filter(x => x[0] === "execution_error");
+                                    throw new Error(JSON.stringify(errors).slice(0, 700) || "Irodoriの生成が失敗しました");
+                                }
+                                const saved = record.outputs?.[prepared.output_node]?.audio?.[0];
+                                if (!saved) throw new Error("SaveAudioWavのWAV出力が履歴にありません。生成ログを確認してください。");
+                                const take = normalizeTake(saved);
+                                if (!take) throw new Error("生成音声のファイル情報が正しくありません。");
+                                const oldSettings = getV("irodori_tts", {});
+                                setV("irodori_tts", {...oldSettings, ...requestBody,
+                                    seed:Math.floor(Number(seed.value)), last_generated_seed:requestBody.seed,
+                                    source:sourceSelect.value, pending_audio:take, pending_text:text});
+                                if (!card.isConnected) return;
+                                setPreview(take);
+                                savedStatus.textContent = "";
+                                status.textContent = "音声生成完了！試聴して気に入らなければ再度［音声生成］を押してね。";
+                            } catch (e) {
+                                console.error("[HKMC Irodori]", e);
+                                status.textContent = "エラー: " + e.message;
+                            } finally {
+                                gen.disabled = false;
+                                saveBtn.disabled = false;
+                                gen.textContent = oldText;
+                            }
+                        };
+                        saveBtn.onclick = async () => {
+                            if (!pendingTake) { savedStatus.textContent = "先に音声を生成してください。"; return; }
+                            const name = nameInput.value.trim();
+                            if (!name) { savedStatus.textContent = "保存する名前を入力してね。"; nameInput.focus(); return; }
+                            const slot = Number(targetSlot.value);
+                            if (![0, 1, 2].includes(slot)) { savedStatus.textContent = "A1〜A3を選んでね。"; return; }
+                            gen.disabled = true;
+                            saveBtn.disabled = true;
+                            try {
+                                const response = await api.fetchApi("/h3/irodori/attach", {
+                                    method:"POST", headers:{"Content-Type":"application/json"},
+                                    body:JSON.stringify({...pendingTake, name})
+                                });
+                                const imported = await response.json();
+                                if (!response.ok || !imported.success) throw new Error(imported.error || "音声の保存に失敗しました");
+                                if (!Array.isArray(state.items)) state.items = [];
+                                state.items = state.items.filter(it => !((it.laneType || it.type) === "audio" && Number(it.slot) === slot));
+                                state.items.push({type:"audio",laneType:"audio",slot,value:imported.input_name});
+                                const timeline = wMap.timeline_data;
+                                if (timeline) { timeline.value = JSON.stringify(state); if (timeline.callback) timeline.callback(timeline.value); }
+                                const match = /^S([1-5])$/.exec(speakerSelect.value);
+                                if (match) {
+                                    const target = wMap[`char${match[1]}_audio`];
+                                    if (target) { target.value = `<Audio ${slot+1}>`; if (target.callback) target.callback(target.value); }
+                                }
+                                const oldSettings = getV("irodori_tts", {});
+                                setV("irodori_tts", {...oldSettings, save_name:name, speaker:speakerSelect.value,
+                                    slot, last_audio:imported.input_name, saved_take_filename:pendingTake.filename});
+                                renderFixedMediaLanes();
+                                savedStatus.textContent = `保存完了！ ${imported.input_name} → A${slot+1}`;
+                                status.textContent = "保存完了。引き続き再生成・試聴もできます。";
+                            } catch(e) {
+                                console.error("[HKMC Irodori]", e);
+                                savedStatus.textContent = "保存エラー: " + e.message;
+                            } finally {
+                                gen.disabled = false;
+                                saveBtn.disabled = false;
+                            }
+                        };
                     } else if (activeTab === "llm") {
                         const titleLLM = document.createElement("div");
                         titleLLM.className = "h3-char-title";
@@ -2178,7 +2564,6 @@ app.registerExtension({
                         };
                         banner.append(chkUse, txtGroup);
 
-                        // === ベースプロンプトのヘッダー ===
                         const baseHeader = document.createElement("div");
                         baseHeader.style.cssText = "display:flex; justify-content:space-between; align-items:flex-end; margin-top:12px;";
                         
@@ -2250,7 +2635,7 @@ app.registerExtension({
                             const payload = { target_clip: "base" };
                             (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
                             try {
-                                const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                const parsed = h3ParseClipSettings(wMap["clips_data_json"].value);
                                 Object.assign(payload, parsed);
                             } catch(e) {}
                             
@@ -2370,7 +2755,7 @@ app.registerExtension({
                                         const payload = { target_clip: i };
                                         (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
                                         try {
-                                            const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                            const parsed = h3ParseClipSettings(wMap["clips_data_json"].value);
                                             Object.assign(payload, parsed);
                                         } catch(e) {}
                                         
@@ -2431,7 +2816,7 @@ app.registerExtension({
                             }
                             
                             try {
-                                const parsed = JSON.parse(wMap["clips_data_json"].value || "{}");
+                                const parsed = h3ParseClipSettings(wMap["clips_data_json"].value);
                                 Object.assign(payload, parsed);
                             } catch(e) {}
 
@@ -2789,7 +3174,7 @@ app.registerExtension({
                             autoState = { ...autoState, ...JSON.parse(wMap["auto_data"].value) };
                         }
                     } catch(e){}
-                    try { clipData = JSON.parse(wMap["clips_data_json"]?.value || "{}"); } catch(e) { clipData = {}; }
+                    clipData = h3ParseClipSettings(wMap["clips_data_json"]?.value);
 
                     renderTabContent();
                     renderFixedMediaLanes();
