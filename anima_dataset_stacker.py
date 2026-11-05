@@ -13,20 +13,20 @@ class AnimaDatasetStacker:
     """
 
     ANGLES = [
-        {"id": "front", "name": "正面", "tag": "front view, camera directly in front of the character, character facing the camera", "is_back": False},
-        {"id": "front_left", "name": "左斜前", "tag": "front three-quarter view, camera in front of the character and 45 degrees to the character's left, face visible", "is_back": False},
-        {"id": "left", "name": "左向き", "tag": "left-facing side view, camera at the character's left side, left profile, nose pointing left", "is_back": False},
-        {"id": "back_left", "name": "左斜後", "tag": "rear three-quarter view, camera behind the character at 45 degrees to the character's left, back of head and back visible", "is_back": True},
-        {"id": "back", "name": "後ろ", "tag": "direct rear view, camera directly behind the character, back of head and back visible", "is_back": True},
-        {"id": "back_right", "name": "右斜後", "tag": "rear three-quarter view, camera behind the character at 45 degrees to the character's right, back of head and back visible", "is_back": True},
-        {"id": "right", "name": "右向き", "tag": "right-facing side view, camera at the character's right side, right profile, nose pointing right", "is_back": False},
-        {"id": "front_right", "name": "右斜前", "tag": "front three-quarter view, camera in front of the character and 45 degrees to the character's right, face visible", "is_back": False},
-        {"id": "top", "name": "上から", "tag": "overhead view, camera directly above the character looking down, top-down view, bird's-eye view", "is_back": False},
-        {"id": "bottom", "name": "下から", "tag": "worm's-eye view, camera directly below the character looking upward, view from underneath", "is_back": False},
-        {"id": "front_low", "name": "前斜下", "tag": "low-angle front view, camera below and in front of the character looking upward", "is_back": False},
-        {"id": "back_low", "name": "後斜下", "tag": "low-angle rear view, camera behind and below the character looking upward, rear of head and back visible", "is_back": True},
-        {"id": "front_high", "name": "前斜上", "tag": "high-angle front view, camera above and in front of the character looking downward", "is_back": False},
-        {"id": "back_high", "name": "後斜上", "tag": "high-angle rear view, camera above and behind the character looking downward, rear of head and back visible", "is_back": True},
+        {"id": "front", "name": "正面", "tag": "front view, straight-on perspective, character facing forward", "is_back": False},
+        {"id": "front_left", "name": "左斜前", "tag": "front three-quarter view, viewed from the character's front-left at 45 degrees, face visible", "is_back": False},
+        {"id": "left", "name": "左向き", "tag": "left-facing side view, left profile, nose pointing left", "is_back": False},
+        {"id": "back_left", "name": "左斜後", "tag": "rear three-quarter view, viewed from the character's back-left at 45 degrees, back of head and back visible", "is_back": True},
+        {"id": "back", "name": "後ろ", "tag": "direct rear view, seen from behind, back of head and back visible", "is_back": True},
+        {"id": "back_right", "name": "右斜後", "tag": "rear three-quarter view, viewed from the character's back-right at 45 degrees, back of head and back visible", "is_back": True},
+        {"id": "right", "name": "右向き", "tag": "right-facing side view, right profile, nose pointing right", "is_back": False},
+        {"id": "front_right", "name": "右斜前", "tag": "front three-quarter view, viewed from the character's front-right at 45 degrees, face visible", "is_back": False},
+        {"id": "top", "name": "上から", "tag": "overhead view, seen from directly above, top-down perspective, bird's-eye view", "is_back": False},
+        {"id": "bottom", "name": "下から", "tag": "worm's-eye view, seen from directly below, upward perspective, view from underneath", "is_back": False},
+        {"id": "front_low", "name": "前斜下", "tag": "low-angle front view, upward perspective from the front", "is_back": False},
+        {"id": "back_low", "name": "後斜下", "tag": "low-angle rear view, upward perspective from behind, rear of head and back visible", "is_back": True},
+        {"id": "front_high", "name": "前斜上", "tag": "high-angle front view, downward perspective from the front", "is_back": False},
+        {"id": "back_high", "name": "後斜上", "tag": "high-angle rear view, downward perspective from behind, rear of head and back visible", "is_back": True},
     ]
 
     SHOTS = {
@@ -42,7 +42,7 @@ class AnimaDatasetStacker:
         },
         "face": {
             "name": "顔", 
-            "tag": "extreme close-up, close-up face focus, detailed face portrait, face centered", 
+            "tag": "tight head-and-shoulders close-up, face-dominant composition, framing strictly from the shoulders upward, only head neck and very top of shoulders visible, face filling most of the image, keep the exact garment type and neckline construction, preserve the original layering and sleeveless design, face dominant, shoulders cropped", 
             "parts": {"head": True, "upper": True, "waist": False, "lower": False, "legs": False}
         },
     }
@@ -68,7 +68,7 @@ class AnimaDatasetStacker:
         "eye", "eyes", "pupil", "pupils", "iris", "mouth", "lip", "lips", "teeth", "tongue", "nose",
         "blush", "smile", "grin", "smirk", "expression", "looking at viewer", "looking away",
         "looking back", "looking over shoulder", "turning around", "head turned toward viewer",
-        "front view", "facing front", "facing camera", "front-facing", "three-quarter front view",
+        "front view", "facing front", "facing forward", "front-facing", "three-quarter front view",
         "visible face", "face visible", "eye contact", "bangs", "sidelocks", "cleavage", "breast",
         "breasts", "navel", "collarbone", "collarbones", "necklace", "pendant", "necktie", "bowtie"
     ]
@@ -88,8 +88,8 @@ class AnimaDatasetStacker:
         os.makedirs(base_dir, exist_ok=True)
         files = []
         for f in os.listdir(base_dir):
-            if f.endswith(".txt"):
-                name = f[:-4]
+            if f.endswith((".txt", ".json")):
+                name = os.path.splitext(f)[0]
                 if name.lower().startswith("anima_"):
                     files.append(name[6:])
                 else:
@@ -162,13 +162,22 @@ class AnimaDatasetStacker:
         if preset_name == "None":
             return {}
         char_dir = os.path.join(os.path.dirname(__file__), "characters")
-        cands = [f"Anima_{preset_name}.txt", f"{preset_name}.txt"]
+        cands = [f"Anima_{preset_name}.json", f"anima_{preset_name}.json", f"{preset_name}.json", f"Anima_{preset_name}.txt", f"anima_{preset_name}.txt", f"{preset_name}.txt"]
         target = next((os.path.join(char_dir, c) for c in cands if os.path.exists(os.path.join(char_dir, c))), None)
         if not target:
             return {}
         with open(target, "r", encoding="utf-8") as f:
             content = f.read()
 
+        if target.lower().endswith(".json"):
+            try:
+                data = json.loads(content)
+                if data.get("format") != "anima_character_v2":
+                    raise ValueError("unsupported preset format")
+                return {"__v2__": [row for row in data.get("tags", []) if isinstance(row, dict) and isinstance(row.get("text"), str)]}
+            except (ValueError, TypeError, AttributeError) as exc:
+                print(f"[AnimaDatasetStacker] Invalid preset {target}: {exc}")
+                return {}
         sections = {}
         curr = "OTHER"
         for line in content.splitlines():
@@ -181,6 +190,30 @@ class AnimaDatasetStacker:
             else:
                 sections.setdefault(curr, []).append(ls)
         return {k: ", ".join(v) for k, v in sections.items()}
+
+    @staticmethod
+    def is_expression(tag):
+        return bool(re.search(r"smil|laugh|cry|angry|frown|blush|surpris|expression|tears|grin|smirk|jitome", tag, re.I))
+
+    @staticmethod
+    def is_front_only(tag):
+        return bool(re.search(r"\b(?:eyes?|iris|pupils?|mouth|lips?|teeth|tongue|nose|eyelashes|eyebrows|looking at viewer|looking back|looking over shoulder|cleavage|navel)\b", tag, re.I))
+
+    @staticmethod
+    def is_neckline(tag):
+        return bool(re.search(r"^(?:[^,]*\b(?:collar|neckline|scarf|choker|neckwear|hood|shoulder|turtleneck|neck ribbon|bowtie|necktie)\b[^,]*)$", tag, re.I)) and not bool(re.search(r"blouse|shirt|dress|jacket|coat|corset|armor|sweater|robe|vest", tag, re.I))
+
+    @staticmethod
+    def is_head_body_trait(tag):
+        return bool(re.search(r"skin|tan|pale|complexion|freckle", tag, re.I))
+
+    @staticmethod
+    def is_hand_or_arm_only(tag):
+        return bool(re.search(r"\b(?:hands?|fingers?|gloves?|gauntlets?|wrists?|elbows?|forearms?|holding|gripping|arm pose)\b", tag, re.I)) and not bool(re.search(r"\b(?:sleeves?|sleeveless|no-sleeves|shoulders?|shirt|blouse|jacket|coat|robe|kimono|top|innerwear)\b", tag, re.I))
+
+    @staticmethod
+    def is_head_or_neck_accessory(tag):
+        return bool(re.search(r"\b(?:ears?|ear tips?|horns?|headband|hairpin|hair ornament|hat|hood|mask|scarf|neck|collar|choker|ribbon|bowtie|necktie|earrings?|fur)\b", tag, re.I))
 
     def encode(self, clip, text):
         return nodes.CLIPTextEncode().encode(clip, text or " ")[0]
@@ -224,67 +257,77 @@ class AnimaDatasetStacker:
         parsed_char = self.parse_character(character_preset)
 
         def build_one(shot_key, angle_info, expr_info):
-            shot_info = self.SHOTS[shot_key]
             is_back = angle_info["is_back"]
-            
-            if is_back and shot_key == "face":
-                shot_tag = "close-up of the back of the head, rear head close-up, hair silhouette and nape of neck visible"
-            else:
-                shot_tag = shot_info["tag"]
-
+            shot_tag = ("tight rear head-and-shoulders close-up, framing strictly from the shoulders upward, back of head and nape visible, original outfit neckline and shoulder fabric preserved" if is_back and shot_key == "face" else self.SHOTS[shot_key]["tag"])
             parts = [base_quality, shot_tag, angle_info["tag"]]
-
             if expr_info and not is_back:
                 parts.append(expr_info["tag"])
-
-            char_map = [
-                (shot_info["parts"]["head"], ["HEAD", "FACE", "HAIR"]),
-                (shot_info["parts"]["upper"] and not (is_back and shot_key == "face"), ["UPPER", "BODY", "CHEST"]),
-                (shot_info["parts"]["waist"] and not (is_back and shot_key == "face"), ["WAIST", "BELT"]),
-                (shot_info["parts"]["lower"] and not (is_back and shot_key == "face"), ["LOWER", "SKIRT", "PANTS"]),
-                (shot_info["parts"]["legs"] and not (is_back and shot_key == "face"), ["LEGS", "FEET", "SHOES"]),
-            ]
-            for enabled, tags in char_map:
-                if enabled:
-                    found = [parsed_char[t] for t in tags if t in parsed_char and parsed_char[t]]
-                    if found:
-                        tag_text = ", ".join(found)
-                        if expr_info and not is_back:
-                            tag_text = self.filter_expression(tag_text)
-                        parts.append(tag_text)
-            
-            combined = ", ".join([p for p in parts if p.strip()])
-            filtered = self.filter_back(combined, is_back)
-            
+            if "__v2__" in parsed_char:
+                categories = {
+                    "full": {"identity", "face", "hair", "body", "upper", "waist", "lower", "legs", "hands", "accessories", "other"},
+                    "upper": {"identity", "face", "hair", "body", "upper", "waist", "hands", "accessories", "other"},
+                    "face": {"identity", "face", "hair", "body", "other", "waist", "lower"},
+                }[shot_key]
+                if shot_key == "face":
+                    categories = categories | {"upper", "accessories"}
+                for row in parsed_char["__v2__"]:
+                    category = row.get("category", "other")
+                    tag = row["text"].strip()
+                    if not tag:
+                        continue
+                    if category not in categories:
+                        continue
+                    if category in ("expression", "pose"):
+                        continue
+                    if is_back and self.is_front_only(tag):
+                        continue
+                    if shot_key == "face" and category == "upper" and self.is_hand_or_arm_only(tag):
+                        continue
+                    if shot_key == "face" and category == "accessories" and not self.is_head_or_neck_accessory(tag):
+                        continue
+                    if shot_key == "face" and category == "body" and not (self.is_head_body_trait(tag) or re.search(r"ear|horn|fur", tag, re.I)):
+                        continue
+                    if shot_key == "face" and category == "lower" and not re.search(r"sleeve|top|innerwear|shirt|blouse|robe|jacket|kimono|ninja|uniform", tag, re.I):
+                        continue
+                    if shot_key == "face" and category == "waist" and not re.search(r"obi|sash|belt|waistband|kimono|ninja", tag, re.I):
+                        continue
+                    if shot_key == "face" and category == "other" and not re.search(r"ninja|uniform|kimono|clothes|clothing|outfit|style|sleeve|fabric|garment|traditional", tag, re.I):
+                        continue
+                    if shot_key == "face" and is_back and category == "body" and not re.search(r"ear|horn|fur|skin|hair", tag, re.I):
+                        continue
+                    parts.append(tag)
+            else:
+                char_map = [
+                    (self.SHOTS[shot_key]["parts"]["head"], ["HEAD", "FACE", "HAIR"]),
+                    (self.SHOTS[shot_key]["parts"]["upper"] and not (is_back and shot_key == "face"), ["UPPER", "BODY", "CHEST"]),
+                    (self.SHOTS[shot_key]["parts"]["waist"] and not (is_back and shot_key == "face"), ["WAIST", "BELT"]),
+                    (self.SHOTS[shot_key]["parts"]["lower"] and not (is_back and shot_key == "face"), ["LOWER", "SKIRT", "PANTS"]),
+                    (self.SHOTS[shot_key]["parts"]["legs"] and not (is_back and shot_key == "face"), ["LEGS", "FEET", "SHOES"]),
+                ]
+                for enabled, keys in char_map:
+                    if enabled:
+                        for key in keys:
+                            if key in parsed_char:
+                                for tag in parsed_char[key].split(","):
+                                    tag = tag.strip()
+                                    if not tag:
+                                        continue
+                                    if expr_info and self.is_expression(tag):
+                                                        continue
+                                    if is_back and self.is_front_only(tag):
+                                                        continue
+                                    parts.append(tag)
             if is_back:
-                filtered += (
-                    ", rear view, camera behind the character, character facing away from the camera, "
-                    "back of head visible, face turned completely away, facial features fully occluded, "
-                    "no visible eyes, no visible irises, no visible pupils, no looking over shoulder"
-                )
-                combined_lower = combined.lower()
-
-                if "tail" in combined_lower:
-                    filtered += ", tail from lower back"
-
-                if any(k in combined_lower for k in ["twintail", "twin tail", "two tails", "twin braid"]):
-                    filtered += ", twintails from behind, two separate hair tails visible from behind"
-                elif any(k in combined_lower for k in ["side ponytail", "side-ponytail", "side tail"]):
-                    filtered += ", side ponytail visible from behind, hair gathered and tied to one side"
-                elif any(k in combined_lower for k in ["ponytail", "pony tail", "tied back", "all back hair tied"]):
-                    filtered += ", ponytail from behind, distinct ponytail hanging down the back, hair tie at back"
-                elif any(k in combined_lower for k in ["hair bun", "buns", "chignon", "topknot"]):
-                    filtered += ", hair bun at the back of head, bun visible from behind"
-                elif any(k in combined_lower for k in ["braid", "braided", "plait"]):
-                    filtered += ", single braid hanging down the back, visible braided texture from behind"
-                elif any(k in combined_lower for k in ["half updo", "half-up", "half up"]):
-                    filtered += ", half updo tied at the back, gathered upper hair with remaining hair flowing down"
-                elif any(k in combined_lower for k in ["short hair", "pixie cut", "buzz cut"]) and "long" not in combined_lower:
-                    filtered += ", short hair at the back, exposed nape of neck, short neckline hair"
-            
-            clean_text = re.sub(r'#.*', '', filtered).replace('\n', ' ')
-            clean_text = re.sub(r',\s*,+', ',', clean_text).strip(' ,')
-            return clean_text
+                parts.extend(["rear view", "character facing away from viewer", "back of head visible", "face occluded"])
+            unique = []
+            seen = set()
+            for part in parts:
+                for tag in part.split(","):
+                    tag = tag.strip()
+                    if tag and tag.casefold() not in seen:
+                        seen.add(tag.casefold())
+                        unique.append(tag)
+            return ", ".join(unique)
 
         neg_parts = []
         if negative_prompt.strip():
@@ -298,19 +341,25 @@ class AnimaDatasetStacker:
             back_neg_blocks = (
                 "looking back, looking over shoulder, head turned toward viewer, turning around, "
                 "face visible, visible facial features, visible eyes, visible iris, visible pupils, "
-                "front-facing head, three-quarter front view, front view, facing front, facing camera, "
+                "front-facing head, three-quarter front view, front view, facing front, facing forward, "
                 "looking at viewer, eye contact, eyelashes, eyebrows, nose, mouth, lips, teeth, smile, "
                 "backward limbs, reversed hands, backward feet, twisted body"
             )
             neg_parts.append(back_neg_blocks)
 
+        if shot_key == "face":
+            neg_parts.append(
+                "upper body shot, waist-up shot, medium shot, cowboy shot, full body, "
+                "torso visible, chest visible, abdomen visible, waist visible, hips visible, "
+                "legs visible, wide framing, zoomed out, extra clothing layers, redesigned outfit"
+            )
+
+        neg_parts.append("camera, camera lens, photography equipment")
+
         full_neg = ", ".join(neg_parts)
-        neg_cond = self.encode(clip, full_neg)
-
         pos_text = build_one(shot_key, angle_info, expr_info)
-        pos_cond = self.encode(clip, pos_text)
+        return (model, clip, self.encode(clip, pos_text), self.encode(clip, full_neg), pos_text)
 
-        return (model, clip, pos_cond, neg_cond, pos_text)
 
 NODE_CLASS_MAPPINGS = {
     "AnimaDatasetStacker": AnimaDatasetStacker
