@@ -80,6 +80,79 @@ if (!window._h3_gui_queue_hooked) {
     };
 }
 
+const H3_RESET_SECTIONS = [
+    { id: "cast", label: "キャラクター設定" },
+    { id: "timeline", label: "タイムライン" },
+    { id: "scene", label: "演出" },
+    { id: "clip", label: "クリップ" },
+    { id: "auto", label: "おまかせ" },
+    { id: "prompt", label: "プロンプト生成" }
+];
+
+function h3ResetFieldNames(selected) {
+    const names = new Set();
+    const add = (...fields) => fields.forEach(field => names.add(field));
+    if (selected.cast) {
+        for (let i = 1; i <= 5; i++) {
+            for (const field of ["enabled", "preset", "name", "refmod", "pics", "audio", "extra"])
+                add(`char${i}_${field}`);
+        }
+        add("timeline_data");
+    }
+    if (selected.timeline) {
+        for (let i = 1; i <= 4; i++) {
+            for (const field of ["enabled", "time", "action", "speaker", "dialogue"])
+                add(`shot${i}_${field}`);
+        }
+    }
+    if (selected.scene) {
+        add("situation", "overall_story", "quality_control", "retention_choices_json", "ambient_sound", "bgm");
+        for (let i = 1; i <= 5; i++) {
+            for (const field of ["kind", "def", "pics", "audio"])
+                add(`subject_${field}_${i}`);
+        }
+    }
+    if (selected.clip) {
+        for (let i = 1; i <= 10; i++) {
+            for (const field of ["enabled", "continue", "link_next", "prompt"])
+                add(`c${i}_${field}`);
+            for (let j = 1; j <= 4; j++) {
+                for (const field of ["enabled", "time", "action", "speaker", "dialogue"])
+                    add(`c${i}_s${j}_${field}`);
+            }
+        }
+    }
+    if (selected.auto) add("auto_data");
+    if (selected.prompt) add("use_custom_prompt", "custom_prompt", "generated_clip_prompts");
+    return [...names];
+}
+
+function h3ResetSelectedWidgets(wMap, freshValues, selected) {
+    const clone = value => {
+        try { return JSON.parse(JSON.stringify(value)); }
+        catch (_) { return value; }
+    };
+    for (const name of h3ResetFieldNames(selected)) {
+        if (!wMap[name] || !Object.prototype.hasOwnProperty.call(freshValues, name)) continue;
+        wMap[name].value = clone(freshValues[name]);
+    }
+    if ((selected.clip || selected.prompt) && wMap.clips_data_json) {
+        const data = h3ParseClipSettings(wMap.clips_data_json.value);
+        const defaults = h3ParseClipSettings(freshValues.clips_data_json);
+        const resetKey = key => {
+            if (Object.prototype.hasOwnProperty.call(defaults, key)) data[key] = clone(defaults[key]);
+            else delete data[key];
+        };
+        if (selected.clip) {
+            resetKey("cache_settings");
+            for (let i = 1; i <= 10; i++) resetKey(`c${i}_locked`);
+        }
+        if (selected.prompt) resetKey("base_locked");
+        wMap.clips_data_json.value = JSON.stringify(data);
+        if (wMap.clips_data_json.callback) wMap.clips_data_json.callback(wMap.clips_data_json.value);
+    }
+}
+
 function syncRefModRemote(slotIndex, modName) {
     if (!app.graph) return;
 
@@ -282,6 +355,74 @@ function installStudioStyles() {
             border: none;
             padding-left: 2px;
             margin-top: 2px;
+        }
+        .h3-guided-card {
+            font-size: 11px;
+            line-height: 1.5;
+        }
+        .h3-guided-intro {
+            font-size: 10px;
+            line-height: 1.6;
+            color: #9aa0a6;
+        }
+        .h3-guided-settings label {
+            font-size: 10px;
+            font-weight: 600;
+            color: #aeb7c2;
+        }
+        .h3-guided-section-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: #dbe0e6;
+        }
+        .h3-guided-hint {
+            font-size: 9px;
+            font-weight: 400;
+            color: #8b949e;
+        }
+        .h3-guided-drafts {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .h3-guided-shot-field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .h3-guided-shot-label {
+            font-size: 10px;
+            font-weight: 400;
+            color: #9aa0a6;
+        }
+        .h3-guided-shot-number {
+            font-size: 11px;
+            font-weight: 700;
+            color: #dbe0e6;
+        }
+        .h3-guided-step-title {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #dbe0e6;
+        }
+        .h3-guided-step-detail {
+            font-size: 10px;
+            font-weight: 600;
+            color: #aeb7c2;
+        }
+        .h3-guided-field-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: #9aa0a6;
+        }
+        .h3-guided-card select,
+        .h3-guided-card input,
+        .h3-guided-card textarea {
+            font-size: 11px;
         }
         .h3-field-row {
             display: flex;
@@ -820,6 +961,17 @@ app.registerExtension({
                     wMap["auto_data"].value = "{}";
                 }
 
+                const h3ResetSelection = Object.fromEntries(H3_RESET_SECTIONS.map(section => [section.id, true]));
+
+                const h3FreshWidgetValues = {};
+                for (const [name, widget] of Object.entries(wMap)) {
+                    const value = widget.value;
+                    if (value !== undefined) {
+                        try { h3FreshWidgetValues[name] = JSON.parse(JSON.stringify(value)); }
+                        catch (_) { h3FreshWidgetValues[name] = value; }
+                    }
+                }
+
                 const charEnabledState = {};
                 for(let i=1; i<=5; i++) charEnabledState[i] = wMap[`char${i}_enabled`] ? !!wMap[`char${i}_enabled`].value : (i===1);
 
@@ -839,6 +991,7 @@ app.registerExtension({
 
                 let autoState = {
                     enabled: false,
+                    directorMode: "detailed",
                     overwrite: false,
                     noClips: false,
                     duration: 5,
@@ -1466,6 +1619,270 @@ app.registerExtension({
                     return wrapper;
                 };
 
+                const directorFields = [
+                    ['size','ショットサイズ',['おまかせ','ロング','ミディアム','クローズアップ','極端なアップ']],
+                    ['angle','カメラアングル',['おまかせ','アイレベル','ローアングル','ハイアングル','俯瞰']],
+                    ['orientation','被写体の向き',['おまかせ','正面','横向き','背面','斜め']],
+                    ['action','動作',['原案のまま','おまかせ']],
+                    ['expression','表情',['おまかせ','笑顔','真剣','驚き','悲しみ','無表情']],
+                    ['gaze','視線',['おまかせ','前方','相手','カメラ','遠方','下方']],
+                    ['camera','カメラワーク',['おまかせ','固定','パン','追従','旋回','ドリーイン','ドリーアウト']],
+                    ['dialogue','セリフ',['セリフなし','原案に記載','おまかせ（セリフ追加なし）']],
+                    ['extra','追加演出',['追加なし','おまかせ']]
+                ];
+                const ensureDirector = () => {
+                    if (!autoState.guided || !Array.isArray(autoState.guided.shots)) {
+                        autoState.guided = {story:'', count:4, duration:15, shot:0, field:0,
+                            shots:Array.from({length:4},()=>({story:'', choices:{}, notes:{}}))};
+                    }
+                    while (autoState.guided.shots.length < 4) autoState.guided.shots.push({story:'',choices:{},notes:{}});
+                    autoState.guided.count = Math.max(1, Math.min(4, Number(autoState.guided.count)||4));
+                    autoState.guided.shot = Math.max(0, Math.min(autoState.guided.count-1, Number(autoState.guided.shot)||0));
+                    autoState.guided.field = Math.max(0, Math.min(8, Number(autoState.guided.field)||0));
+                    for (const shot of autoState.guided.shots) { shot.choices ||= {}; shot.notes ||= {}; }
+                    return autoState.guided;
+                };
+                let pendingDirectorPatch = null;
+                let directorHistory = [];
+                let promptCheckState = null;
+                const promptCheckFingerprint = () => JSON.stringify({
+                    story:String(wMap.overall_story?.value||''),
+                    shots:directorSnapshot(),
+                    subjects:Array.from({length:5},(_,i)=>{const n=i+1;return [
+                        !!charEnabledState[n],wMap[`char${n}_name`]?.value||'',
+                        wMap[`char${n}_preset`]?.value||'',wMap[`char${n}_extra`]?.value||'',
+                        wMap[`subject_def_${n}`]?.value||'',wMap[`subject_kind_${n}`]?.value||''];}),
+                    quality:wMap.quality_control?.value||'',creative:wMap.creative_mode?.value||'',
+                    sound:wMap.ambient_sound?.value||'',music:wMap.bgm?.value||''
+                });
+                const setDirectorWidget = (name, value) => {
+                    const w = wMap[name]; if (!w) return;
+                    w.value = value; if (w.callback) w.callback(value);
+                };
+                const getDirectorNames = () => {
+                    const names = {};
+                    for (let i=1; i<=5; i++) {
+                        const raw = String(charEnabledState[i] ? (wMap[`char${i}_name`]?.value||'') : (wMap[`subject_def_${i}`]?.value||'')).trim();
+                        if (raw) names[i] = raw;
+                    }
+                    return names;
+                };
+                const directorConvert = async (text) => {
+                    const res = await api.fetchApi('/h3/convert_subject_names', {method:'POST',
+                        headers:{'Content-Type':'application/json'},body:JSON.stringify({text,names:getDirectorNames()})});
+                    if (!res.ok) throw Error('Subjectコード変換に失敗しました');
+                    const obj = await res.json();
+                    if (typeof obj.text !== 'string') throw Error('Subjectコード変換の応答が不正です');
+                    return obj.text;
+                };
+                const directorSnapshot = () => Array.from({length:4},(_,i)=>{
+                    const n=i+1;
+                    return {enabled:!!wMap[`shot${n}_enabled`]?.value,
+                        time:String(wMap[`shot${n}_time`]?.value||''),
+                        action:String(wMap[`shot${n}_action`]?.value||''),
+                        dialogue:String(wMap[`shot${n}_dialogue`]?.value||''),
+                        speaker:String(wMap[`shot${n}_speaker`]?.value||'None')};
+                });
+                const directorApplySnapshot = (shots) => {
+                    shots.forEach((s,i)=>{const n=i+1;
+                        for(const field of ['enabled','time','action','dialogue','speaker']) {
+                            setDirectorWidget(`shot${n}_${field}`,s[field]);
+                        }
+                        shotEnabledState[n]=!!s.enabled;
+                    });
+                };
+                const directorRequest = async (url, payload) => {
+                    const settings = {};
+                    for(const k of ['llm_provider','llm_api_key','llm_model']) settings[k]=wMap[k]?.value||'';
+                    const controller = new AbortController();
+                    const timer = setTimeout(()=>controller.abort(),600000);
+                    try {
+                        const res=await api.fetchApi(url,{method:'POST',headers:{'Content-Type':'application/json'},
+                            body:JSON.stringify({...settings,...payload}),signal:controller.signal});
+                        const result=await res.json();
+                        if (!res.ok || !result.success) throw Error(result.error||`HTTP ${res.status}`);
+                        return result;
+                    } finally {clearTimeout(timer);}
+                };
+                const directorElement = (tag,text='',cls='') => {
+                    const el=document.createElement(tag); el.textContent=text; if(cls)el.className=cls; return el;
+                };
+                const directorButton = (label, handler) => {
+                    const btn=directorElement('button',label,'h3-btn-gen-prompt');
+                    btn.type='button'; btn.style.cssText='font-size:11px;padding:7px 12px;flex:1;';
+                    btn.onclick=handler; return btn;
+                };
+                const directorTextArea = (value, placeholder, change, rows=3) => {
+                    const ta=document.createElement('textarea');ta.className='h3-prompt-textarea';
+                    ta.style.height=`${Math.max(68,rows*26)}px`;ta.value=value||'';ta.placeholder=placeholder;
+                    ta.oninput=()=>change(ta.value);return ta;
+                };
+                const renderGuidedDirector = (host) => {
+                    const d=ensureDirector();
+                    const card=directorElement('div','','h3-char-card h3-guided-card');
+                    card.appendChild(directorElement('div','詳細な構想を考案｜ベース動画専用','h3-char-title'));
+                    card.appendChild(directorElement('div','ショット原案と9項目をもとに、LLMが時系列・視点を統合した撮影文章を考案。クリップは変更しません。','h3-guided-intro'));
+                    const settings=directorElement('div');settings.className='h3-guided-settings';settings.style.cssText='display:flex;gap:10px;align-items:center;flex-wrap:wrap;';
+                    for (const [key,label,min,max] of [['count','ショット数',1,4],['duration','動画の秒数',1,15]]) {
+                        const lbl=directorElement('label',label+' ');
+                        const inp=document.createElement('input');inp.type='number';inp.min=min;inp.max=max;inp.step='1';
+                        inp.value=d[key];inp.style.cssText='width:55px;background:#222;color:white;border:1px solid #555;border-radius:4px;padding:3px 4px;';
+                        inp.onchange=()=>{d[key]=Math.max(min,Math.min(max,parseInt(inp.value)||max));saveAutoState();renderTabContent();};
+                        lbl.appendChild(inp);settings.appendChild(lbl);
+                    }
+                    card.appendChild(settings);
+                    const synopsisHead=directorElement('div');
+                    synopsisHead.style.cssText='display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;';
+                    const synopsisTitle=directorElement('label','','h3-guided-section-label');
+                    synopsisTitle.appendChild(directorElement('span','全体のあらすじ'));
+                    synopsisTitle.appendChild(directorElement('span','（生成時に［演出］のsummaryへ反映）','h3-guided-hint'));
+                    const splitBtn=directorButton('✨ 自動ショット構成',async()=>{
+                        const currentStory=String(d.story||'').trim();
+                        if(!currentStory){alert('全体のあらすじを先に入力してください。');return;}
+                        const oldCount=d.count;
+                        const previous=d.shots.slice(0,oldCount).map(x=>x.story);
+                        if(previous.some(x=>x.trim()) && !confirm('ショット1〜'+oldCount+'の「このショットで起こる出来事」を置き換えます。9項目の演出設定は保持します。続けますか？'))return;
+                        splitBtn.disabled=true;splitBtn.textContent='⏳ ショット分割中...';
+                        try{
+                            const result=await directorRequest('/h3/auto_split_story',{
+                                story:currentStory,shot_count:oldCount,names:getDirectorNames()});
+                            if(d.story.trim()!==currentStory || d.count!==oldCount ||
+                                d.shots.slice(0,oldCount).some((x,i)=>x.story!==previous[i])){
+                                alert('LLM処理中にあらすじかショット欄が変更されました。結果を反映せず破棄しました。');return;
+                            }
+                            if(!Array.isArray(result.shots)||result.shots.length!==oldCount||
+                               result.shots.some(x=>typeof x!=='string'||!x.trim()))throw Error('ショット構成の返答が不正です');
+                            result.shots.forEach((story,i)=>{d.shots[i].story=story;});
+                            saveAutoState();renderTabContent();
+                        }catch(err){alert('自動ショット構成エラー: '+err.message);}
+                        finally{splitBtn.disabled=false;splitBtn.textContent='✨ 自動ショット構成';}
+                    });
+                    splitBtn.style.cssText='flex:0 0 auto;font-size:10px;padding:6px 10px;';
+                    synopsisHead.append(synopsisTitle,splitBtn);
+                    card.appendChild(synopsisHead);
+                    card.appendChild(directorTextArea(d.story,'動画全体で何が起こるか',v=>{d.story=v;saveAutoState();},2));
+                    const drafts=directorElement('div','','h3-guided-drafts');
+                    for(let i=0;i<d.count;i++){
+                        const shotField=directorElement('div','','h3-guided-shot-field');
+                        const shotLabel=directorElement('label','','h3-guided-shot-label');
+                        shotLabel.appendChild(directorElement('span',`ショット${i+1}`,'h3-guided-shot-number'));
+                        shotLabel.appendChild(directorElement('span','：このショットで起こる出来事（必須）'));
+                        shotField.appendChild(shotLabel);
+                        shotField.appendChild(directorTextArea(d.shots[i].story,'登場人物・動作・出来事・必要なセリフなど',v=>{d.shots[i].story=v;saveAutoState();},2));
+                        drafts.appendChild(shotField);
+                    }
+                    card.appendChild(drafts);
+                    const step=d.shots[d.shot];const [field,title,options]=directorFields[d.field];
+                    const stepBox=directorElement('div');stepBox.style.cssText='border:1px solid #42658b;padding:10px;border-radius:8px;display:flex;flex-direction:column;gap:7px;';
+                    const stepHeading=directorElement('div','','h3-guided-step-title');
+                    stepHeading.appendChild(directorElement('span',`ショット${d.shot+1}/${d.count}`));
+                    stepHeading.appendChild(directorElement('span',`設定 ${d.field+1}/9：${title}`,'h3-guided-step-detail'));
+                    stepBox.appendChild(stepHeading);
+                    const select=document.createElement('select'); select.style.cssText='padding:7px;background:#222;color:#eee;border:1px solid #555;border-radius:6px;';
+                    for(const opt of options){const el=document.createElement('option');el.value=opt;el.textContent=opt;select.appendChild(el);}
+                    const selected=step.choices[field]||options[0];
+                    if(!options.includes(selected)){const custom=document.createElement('option');custom.value=selected;custom.textContent=selected;select.appendChild(custom);}
+                    select.value=selected;
+                    select.onchange=()=>{step.choices[field]=select.value;saveAutoState();};
+                    stepBox.appendChild(select);
+                    const extraLabel=directorElement('label','','h3-guided-field-label');
+                    extraLabel.appendChild(directorElement('span','自由入力・追記'));
+                    extraLabel.appendChild(directorElement('span','（選択肢と併用可）','h3-guided-hint'));
+                    stepBox.appendChild(extraLabel);
+                    stepBox.appendChild(directorTextArea(step.notes[field]||'','例：旋回しつつ顔を捉える。別の演出項目もここに追記可能',v=>{step.notes[field]=v;saveAutoState();},2));
+                    const nav=directorElement('div');nav.style.cssText='display:flex;gap:6px;';
+                    nav.appendChild(directorButton('← 戻る',()=>{if(d.field>0)d.field--;else if(d.shot>0){d.shot--;d.field=8;}saveAutoState();renderTabContent();}));
+                    nav.appendChild(directorButton('次へ →',()=>{if(d.field<8)d.field++;else if(d.shot<d.count-1){d.shot++;d.field=0;}saveAutoState();renderTabContent();}));
+                    nav.appendChild(directorButton('次のショットへ',()=>{if(d.shot<d.count-1){d.shot++;d.field=0;}saveAutoState();renderTabContent();}));
+                    stepBox.appendChild(nav);card.appendChild(stepBox);
+                    const generate=directorButton('▶ ここまでで全ショットを構成',async()=>{
+                        if(d.shots.slice(0,d.count).some(s=>!s.story.trim())){alert('すべてのショットの出来事を入力してください。');return;}
+                        if(!confirm('ベース動画の現在のショットを上書きします。クリップは変更しません。続けますか？'))return;
+                        generate.disabled=true;generate.textContent='⏳ 構成を生成中...';
+                        try{
+                            const result=await directorRequest('/h3/interactive_base_generate',{
+                                story:d.story,shot_count:d.count,duration:d.duration,shots:d.shots.slice(0,d.count),names:getDirectorNames()});
+                            const old=directorSnapshot(),updated=old.map(s=>({...s}));
+                            for(let i=0;i<4;i++){
+                                if(i>=d.count){updated[i].enabled=false;continue;}
+                                const s=result.shots[i];const start=d.duration*i/d.count,end=d.duration*(i+1)/d.count;
+                                const fmt=n=>`0:${n.toFixed(1).padStart(4,'0')}`;
+                                updated[i]={enabled:true,time:`${fmt(start)}-${fmt(end)}`,
+                                    action:await directorConvert(s.action),dialogue:s.dialogue||'',speaker:s.speaker||'None'};
+                            }
+                            const rawSynopsis = d.story.trim() || d.shots.slice(0,d.count).map(x=>x.story.trim()).join('。');
+                            const synopsis = await directorConvert(rawSynopsis);
+                            directorHistory.push(old);if(directorHistory.length>20)directorHistory.shift();
+                            setDirectorWidget('overall_story', synopsis);
+                            directorApplySnapshot(updated);
+                            const warning = result.warning ? `\n演出上の注意：${result.warning}` : '';
+                            alert('ベース動画と［演出］の全体のあらすじへ反映しました。タイムラインを確認してください。'+warning);
+                            activeTab='timeline';Object.values(tabButtons).forEach(b=>b.classList.remove('active'));
+                            tabButtons.timeline.classList.add('active');renderTabContent();
+                        }catch(err){alert('詳細な構想の考案エラー: '+err.message);generate.disabled=false;generate.textContent='▶ ここまでで全ショットを構成';}
+                    });
+                    card.appendChild(generate);host.appendChild(card);
+                };
+                const renderDirectorRevision = (host) => {
+                    const card=directorElement('div','','h3-char-card');
+                    card.appendChild(directorElement('div','AI部分修正｜現在のタイムラインを維持して変更','h3-char-title'));
+                    const target=document.createElement('select');target.style.cssText='background:#222;color:#eee;padding:6px;border:1px solid #555;';
+                    for(const [value,name] of [['auto','自動判定'],['1','ショット1'],['2','ショット2'],['3','ショット3'],['4','ショット4']]) {
+                        const opt=document.createElement('option');opt.value=value;opt.textContent=name;target.appendChild(opt);
+                    }
+                    card.appendChild(target);
+                    const ta=directorTextArea('','例：ショット2のカメラだけ旋回に変えて。他の要素はそのまま。',()=>{},3);
+                    card.appendChild(ta);
+                    const actions=directorElement('div');actions.style.cssText='display:flex;gap:6px;';
+                    const propose=directorButton('変更案を作成',async()=>{
+                        if(!ta.value.trim()){alert('修正したい内容を入力してください。');return;}
+                        propose.disabled=true;propose.textContent='⏳ 修正案を考えています...';
+                        try{
+                            const before=directorSnapshot();
+                            const res=await directorRequest('/h3/interactive_base_revise',{
+                                shots:before,target:target.value,instruction:ta.value,names:getDirectorNames()});
+                            const changes=[];
+                            for(const c of res.changes){changes.push({...c,value:c.field==='action'?await directorConvert(c.value):c.value});}
+                            pendingDirectorPatch={before,changes};
+                            showPreview();
+                            if(res.warning)alert(res.warning);
+                        }catch(e){alert('AI部分修正エラー: '+e.message);}
+                        finally{propose.disabled=false;propose.textContent='変更案を作成';}
+                    });
+                    actions.appendChild(propose);
+                    actions.appendChild(directorButton('元に戻す',()=>{
+                        if(!directorHistory.length){alert('このセッションに戻せる履歴はありません。');return;}
+                        if(!confirm('直前のタイムライン状態に戻しますか？'))return;
+                        directorApplySnapshot(directorHistory.pop());pendingDirectorPatch=null;renderTabContent();
+                    }));
+                    card.appendChild(actions);
+                    const preview=directorElement('div');preview.style.cssText='display:flex;flex-direction:column;gap:8px;white-space:pre-wrap;overflow-wrap:anywhere;';
+                    card.appendChild(preview);
+                    const showPreview=()=>{
+                        preview.replaceChildren();
+                        if(!pendingDirectorPatch)return;
+                        if(!pendingDirectorPatch.changes.length){preview.appendChild(directorElement('div','変更対象が見つかりませんでした。指示を具体的にしてください。'));return;}
+                        preview.appendChild(directorElement('div','変更前 → 変更後（承認するまでタイムラインは変わりません）'));
+                        for(const c of pendingDirectorPatch.changes){
+                            const n=directorElement('div',`ショット${c.shot} / ${c.field}\n【変更前】${pendingDirectorPatch.before[c.shot-1][c.field]}\n【変更後】${c.value}`);
+                            n.style.cssText='background:#1b1d22;border:1px solid #444;padding:8px;border-radius:6px;font-size:11px;';preview.appendChild(n);
+                        }
+                        const row=directorElement('div');row.style.cssText='display:flex;gap:6px;';
+                        row.appendChild(directorButton('✓ 変更を反映',()=>{
+                            if(JSON.stringify(directorSnapshot())!==JSON.stringify(pendingDirectorPatch.before)){
+                                alert('変更案の作成後にタイムラインが変化しました。再度変更案を作成してください。');pendingDirectorPatch=null;showPreview();return;
+                            }
+                            const next=pendingDirectorPatch.before.map(s=>({...s}));
+                            for(const c of pendingDirectorPatch.changes)next[c.shot-1][c.field]=c.value;
+                            directorHistory.push(pendingDirectorPatch.before);if(directorHistory.length>20)directorHistory.shift();
+                            directorApplySnapshot(next);pendingDirectorPatch=null;renderTabContent();
+                        }));
+                        row.appendChild(directorButton('破棄',()=>{pendingDirectorPatch=null;showPreview();}));
+                        preview.appendChild(row);
+                    };
+                    showPreview();host.appendChild(card);
+                };
+
                 const renderTabContent = () => {
                     contentArea.replaceChildren();
 
@@ -1911,6 +2328,40 @@ app.registerExtension({
                         contentArea.appendChild(activeClipCard);
 
                     } else if (activeTab === "auto") {
+                        const mode = autoState.directorMode === "bulk" ? "bulk" : "detailed";
+                        const switcher = document.createElement("div");
+                        switcher.className = "h3-char-card";
+                        switcher.style.cssText += "gap:9px;";
+                        const switchTitle = directorElement("div", "考案方式を選択", "h3-char-title");
+                        const radioBar = document.createElement("div");
+                        radioBar.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;";
+                        for (const [value, label] of [
+                            ["detailed", "詳細な構想を考案"],
+                            ["bulk", "原案を基に一括考案"]
+                        ]) {
+                            const option = document.createElement("label");
+                            option.style.cssText = `display:flex;align-items:center;justify-content:center;gap:7px;flex:1 1 185px;min-height:34px;padding:7px 10px;box-sizing:border-box;border-radius:7px;cursor:pointer;font-size:11px;font-weight:600;border:1px solid ${mode === value ? "#5bb3f5" : "#383838"};background:${mode === value ? "#173854" : "#202020"};color:${mode === value ? "#fff" : "#aeb7c2"};`;
+                            const radio = document.createElement("input");
+                            radio.type = "radio";
+                            radio.name = `h3-auto-mode-${node.id}`;
+                            radio.value = value;
+                            radio.checked = mode === value;
+                            radio.style.cssText = "margin:0;accent-color:#007acc;";
+                            radio.onchange = () => {
+                                if (!radio.checked) return;
+                                autoState.directorMode = value;
+                                saveAutoState();
+                                renderTabContent();
+                            };
+                            option.append(radio, document.createTextNode(label));
+                            radioBar.appendChild(option);
+                        }
+                        switcher.append(switchTitle, radioBar);
+                        contentArea.appendChild(switcher);
+                        if (mode === "detailed") {
+                            renderGuidedDirector(contentArea);
+                            return;
+                        }
                         const autoCard1 = document.createElement("div");
                         autoCard1.className = "h3-char-card";
                         
@@ -1938,11 +2389,15 @@ app.registerExtension({
                         chkOw.checked = autoState.overwrite;
                         chkOw.onchange = () => {
                             autoState.overwrite = chkOw.checked;
+                            bulkStatus.textContent = "";
                             saveAutoState();
                         };
                         lblOw.append(chkOw, document.createTextNode("現在の入力内容を上書きすることを許可する (必須)"));
 
-                        autoCard1.append(execBtn, warn, lblOw);
+                        const bulkStatus = document.createElement("div");
+                        bulkStatus.style.cssText = "font-size:10px;line-height:1.5;color:#aeb7c2;min-height:15px;white-space:pre-wrap;";
+                        bulkStatus.setAttribute("role", "status");
+                        autoCard1.append(execBtn, warn, lblOw, bulkStatus);
 
                         const autoCard3 = document.createElement("div");
                         autoCard3.className = "h3-char-card";
@@ -2060,94 +2515,105 @@ app.registerExtension({
 
                         execBtn.onclick = async () => {
                             if (!autoState.overwrite) {
-                                alert("現在のタブの入力内容が上書きされます。\nよろしければ「現在の入力内容を上書きすることを許可する」にチェックを入れてください。");
+                                bulkStatus.textContent = "先に『現在の入力内容を上書きすることを許可する』にチェックしてください。";
+                                bulkStatus.style.color = "#ff9b9b";
+                                chkOw.focus();
                                 return;
                             }
-
+                            if (!String(autoState.story || "").trim()) {
+                                bulkStatus.textContent = "『物語・あらすじ・シチュエーション入力』が空です。原案を入力してください。";
+                                bulkStatus.style.color = "#ff9b9b";
+                                storyTa.focus();
+                                return;
+                            }
                             execBtn.disabled = true;
-                            execBtn.innerHTML = `<span>⏳ シナリオ考案中... (LLM通信中)</span>`;
-
+                            execBtn.textContent = "⏳ シナリオ考案中... (LLM通信中)";
+                            bulkStatus.textContent = "LLMでショットを考案しています。完了後、タイムラインへ反映します。";
+                            bulkStatus.style.color = "#aeb7c2";
+                            saveAutoState();
                             const payload = {};
-                            (node.widgets || []).forEach(w => {
-                                payload[w.name] = w.value;
-                            });
-
+                            (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
+                            payload.auto_data = JSON.stringify(autoState);
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 600000);
                             try {
-                                const controller = new AbortController();
-                                const timeoutId = setTimeout(() => controller.abort(), 600000); 
-
-                                const res = await fetch("/h3/generate_auto_scenario", {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify(payload),
-                                    signal: controller.signal
+                                const res = await api.fetchApi("/h3/generate_auto_scenario", {
+                                    method: "POST", headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify(payload), signal: controller.signal
                                 });
-                                clearTimeout(timeoutId);
                                 const data = await res.json();
-                                if (data.success) {
-                                    if (data.base_shots) {
-                                        for (let j = 1; j <= 4; j++) {
-                                            const shotData = data.base_shots[j];
-                                            if (shotData) {
-                                                if (wMap[`shot${j}_enabled`]) { wMap[`shot${j}_enabled`].value = true; if(wMap[`shot${j}_enabled`].callback) wMap[`shot${j}_enabled`].callback(true); }
-                                                if (wMap[`shot${j}_time`]) { wMap[`shot${j}_time`].value = shotData.time; if(wMap[`shot${j}_time`].callback) wMap[`shot${j}_time`].callback(shotData.time); }
-                                                if (wMap[`shot${j}_action`]) { wMap[`shot${j}_action`].value = shotData.action; if(wMap[`shot${j}_action`].callback) wMap[`shot${j}_action`].callback(shotData.action); }
-                                                if (wMap[`shot${j}_dialogue`]) { wMap[`shot${j}_dialogue`].value = ""; if(wMap[`shot${j}_dialogue`].callback) wMap[`shot${j}_dialogue`].callback(""); }
-                                                if (wMap[`shot${j}_speaker`]) { wMap[`shot${j}_speaker`].value = "None"; if(wMap[`shot${j}_speaker`].callback) wMap[`shot${j}_speaker`].callback("None"); }
-                                            } else {
-                                                if (wMap[`shot${j}_enabled`]) { wMap[`shot${j}_enabled`].value = false; if(wMap[`shot${j}_enabled`].callback) wMap[`shot${j}_enabled`].callback(false); }
-                                            }
+                                if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+                                const baseCount = Object.values(data.base_shots || {}).filter(s => s && String(s.action || "").trim()).length;
+                                const clipData = data.clips_data || {};
+                                if (baseCount === 0) throw new Error("ベース動画のショットが0件です。LLM応答を確認してください。");
+                                if (!autoState.noClips) {
+                                    const missing = Array.from({length:autoState.clipCount},(_,k)=>k+1)
+                                        .filter(i => !Object.values(clipData[i] || {}).some(s=>s && String(s.action || "").trim()));
+                                    if (missing.length) throw new Error(`クリップ${missing.join("、")}のショットがありません。`);
+                                }
+                                bulkStatus.textContent = `考案完了：ベース${baseCount}ショット。設定へ反映しています。`;
+                                if (data.base_shots) {
+                                    for (let j = 1; j <= 4; j++) {
+                                        const shotData = data.base_shots[j];
+                                        if (shotData) {
+                                            if (wMap[`shot${j}_enabled`]) { wMap[`shot${j}_enabled`].value = true; if(wMap[`shot${j}_enabled`].callback) wMap[`shot${j}_enabled`].callback(true); }
+                                            if (wMap[`shot${j}_time`]) { wMap[`shot${j}_time`].value = shotData.time; if(wMap[`shot${j}_time`].callback) wMap[`shot${j}_time`].callback(shotData.time); }
+                                            if (wMap[`shot${j}_action`]) { wMap[`shot${j}_action`].value = shotData.action; if(wMap[`shot${j}_action`].callback) wMap[`shot${j}_action`].callback(shotData.action); }
+                                            if (wMap[`shot${j}_dialogue`]) { wMap[`shot${j}_dialogue`].value = ""; if(wMap[`shot${j}_dialogue`].callback) wMap[`shot${j}_dialogue`].callback(""); }
+                                            if (wMap[`shot${j}_speaker`]) { wMap[`shot${j}_speaker`].value = "None"; if(wMap[`shot${j}_speaker`].callback) wMap[`shot${j}_speaker`].callback("None"); }
+                                        } else {
+                                            if (wMap[`shot${j}_enabled`]) { wMap[`shot${j}_enabled`].value = false; if(wMap[`shot${j}_enabled`].callback) wMap[`shot${j}_enabled`].callback(false); }
                                         }
                                     }
-                                    
-                                    if (autoState.noClips) {
-                                        for(let i=1; i<=10; i++) {
+                                }
+                                
+                                if (autoState.noClips) {
+                                    for(let i=1; i<=10; i++) {
+                                        if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = false; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(false); }
+                                    }
+                                } else {
+                                    for (let i = 1; i <= 10; i++) {
+                                        if (i <= autoState.clipCount && data.clips_data[i]) {
+                                            if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = true; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(true); }
+                                            
+                                            for (let j = 1; j <= 4; j++) {
+                                                const shotData = data.clips_data[i][j];
+                                                if (shotData) {
+                                                    if(wMap[`c${i}_s${j}_enabled`]){ wMap[`c${i}_s${j}_enabled`].value = true; if(wMap[`c${i}_s${j}_enabled`].callback) wMap[`c${i}_s${j}_enabled`].callback(true); }
+                                                    if(wMap[`c${i}_s${j}_time`]){ wMap[`c${i}_s${j}_time`].value = shotData.time; if(wMap[`c${i}_s${j}_time`].callback) wMap[`c${i}_s${j}_time`].callback(shotData.time); }
+                                                    if(wMap[`c${i}_s${j}_action`]){ wMap[`c${i}_s${j}_action`].value = shotData.action; if(wMap[`c${i}_s${j}_action`].callback) wMap[`c${i}_s${j}_action`].callback(shotData.action); }
+                                                    if(wMap[`c${i}_s${j}_dialogue`]){ wMap[`c${i}_s${j}_dialogue`].value = ""; if(wMap[`c${i}_s${j}_dialogue`].callback) wMap[`c${i}_s${j}_dialogue`].callback(""); }
+                                                    if(wMap[`c${i}_s${j}_speaker`]){ wMap[`c${i}_s${j}_speaker`].value = "None"; if(wMap[`c${i}_s${j}_speaker`].callback) wMap[`c${i}_s${j}_speaker`].callback("None"); }
+                                                } else {
+                                                    if(wMap[`c${i}_s${j}_enabled`]){ wMap[`c${i}_s${j}_enabled`].value = false; if(wMap[`c${i}_s${j}_enabled`].callback) wMap[`c${i}_s${j}_enabled`].callback(false); }
+                                                }
+                                            }
+                                        } else {
                                             if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = false; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(false); }
                                         }
-                                    } else {
-                                        for (let i = 1; i <= 10; i++) {
-                                            if (i <= autoState.clipCount && data.clips_data[i]) {
-                                                if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = true; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(true); }
-                                                
-                                                for (let j = 1; j <= 4; j++) {
-                                                    const shotData = data.clips_data[i][j];
-                                                    if (shotData) {
-                                                        if(wMap[`c${i}_s${j}_enabled`]){ wMap[`c${i}_s${j}_enabled`].value = true; if(wMap[`c${i}_s${j}_enabled`].callback) wMap[`c${i}_s${j}_enabled`].callback(true); }
-                                                        if(wMap[`c${i}_s${j}_time`]){ wMap[`c${i}_s${j}_time`].value = shotData.time; if(wMap[`c${i}_s${j}_time`].callback) wMap[`c${i}_s${j}_time`].callback(shotData.time); }
-                                                        if(wMap[`c${i}_s${j}_action`]){ wMap[`c${i}_s${j}_action`].value = shotData.action; if(wMap[`c${i}_s${j}_action`].callback) wMap[`c${i}_s${j}_action`].callback(shotData.action); }
-                                                        if(wMap[`c${i}_s${j}_dialogue`]){ wMap[`c${i}_s${j}_dialogue`].value = ""; if(wMap[`c${i}_s${j}_dialogue`].callback) wMap[`c${i}_s${j}_dialogue`].callback(""); }
-                                                        if(wMap[`c${i}_s${j}_speaker`]){ wMap[`c${i}_s${j}_speaker`].value = "None"; if(wMap[`c${i}_s${j}_speaker`].callback) wMap[`c${i}_s${j}_speaker`].callback("None"); }
-                                                    } else {
-                                                        if(wMap[`c${i}_s${j}_enabled`]){ wMap[`c${i}_s${j}_enabled`].value = false; if(wMap[`c${i}_s${j}_enabled`].callback) wMap[`c${i}_s${j}_enabled`].callback(false); }
-                                                    }
-                                                }
-                                            } else {
-                                                if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = false; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(false); }
-                                            }
-                                        }
                                     }
-
-                                    alert("シナリオが各タブに適用されました！\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
-                                    
-                                    activeTab = "timeline";
-                                    Object.values(tabButtons).forEach(b => b.classList.remove("active"));
-                                    tabButtons["timeline"].classList.add("active");
-                                    fixedMediaArea.style.display = "flex";
-                                    
-                                    if (node.onConfigure) {
-                                        node.onConfigure();
-                                    } else {
-                                        renderTabContent();
-                                    }
-
-                                } else {
-                                    alert("シナリオ考案エラー: " + (data.error || "不明なエラー"));
                                 }
+
+                                alert("シナリオが各タブに適用されました！\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
+                                
+                                activeTab = "timeline";
+                                Object.values(tabButtons).forEach(b => b.classList.remove("active"));
+                                tabButtons["timeline"].classList.add("active");
+                                fixedMediaArea.style.display = "flex";
+                                
+                                if (node.onConfigure) {
+                                    node.onConfigure();
+                                } else {
+                                    renderTabContent();
+                                }
+
                             } catch (err) {
-                                alert("通信エラー: " + err.message);
+                                bulkStatus.textContent = `シナリオ考案エラー：${err.message}`;
+                                bulkStatus.style.color = "#ff9b9b";
                             } finally {
+                                clearTimeout(timeoutId);
                                 execBtn.disabled = false;
-                                execBtn.innerHTML = `<span>▶ おまかせシナリオを考案して各タブに適用</span>`;
+                                execBtn.textContent = "▶ おまかせシナリオを考案して各タブに適用";
                             }
                         };
 
@@ -2602,12 +3068,202 @@ app.registerExtension({
                         }
 
                         ta.oninput = () => {
+                            if (promptCheckState && promptCheckState.text !== ta.value) {
+                                promptCheckState = null;
+                                if (typeof renderPromptCheck === 'function') renderPromptCheck();
+                            }
                             if (customWidget) {
                                 customWidget.value = ta.value;
                                 if (customWidget.callback) customWidget.callback(ta.value);
                             }
                         };
 
+                        const inspectorPanel = document.createElement('div');
+                        inspectorPanel.style.cssText = 'display:flex;flex-direction:column;gap:9px;';
+                        const inspectorActions = document.createElement('div');
+                        inspectorActions.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+                        const inspectorBtn = directorButton('🔎 プロンプトをチェック',async()=>{
+                            if(!ta.value.trim()){alert('ベースプロンプトを生成するか入力してください。');return;}
+                            const examinedText=ta.value;
+                            const examinedFingerprint=promptCheckFingerprint();
+                            inspectorBtn.disabled=true;inspectorBtn.textContent='⏳ LLMが検査中...';
+                            try{
+                                const sourceSubjects=[];
+                                for(let i=1;i<=5;i++){
+                                    if(charEnabledState[i]){
+                                        sourceSubjects.push({slot:i,kind:'人物',name:String(wMap[`char${i}_name`]?.value||''),
+                                            preset:String(wMap[`char${i}_preset`]?.value||''),
+                                            extra:String(wMap[`char${i}_extra`]?.value||'')});
+                                    }else if(String(wMap[`subject_def_${i}`]?.value||'').trim()){
+                                        sourceSubjects.push({slot:i,kind:String(wMap[`subject_kind_${i}`]?.value||'オブジェクト'),
+                                            definition:String(wMap[`subject_def_${i}`]?.value||'')});
+                                    }
+                                }
+                                const source={
+                                    overall_story:String(wMap.overall_story?.value||''),
+                                    shots:directorSnapshot().map((x,i)=>({...x,shot:i+1})).filter(x=>x.enabled),
+                                    subjects:sourceSubjects,
+                                    quality_control:String(wMap.quality_control?.value||''),
+                                    creative_mode:String(wMap.creative_mode?.value||'オフ'),
+                                    ambient_sound:String(wMap.ambient_sound?.value||''),
+                                    bgm:String(wMap.bgm?.value||'')
+                                };
+                                const result=await directorRequest('/h3/check_generated_prompt',{
+                                    prompt:examinedText,source});
+                                if(ta.value!==examinedText || promptCheckFingerprint()!==examinedFingerprint){
+                                    alert('検査中にプロンプトか元の指定が変更されました。古いチェック結果は表示しません。');return;
+                                }
+                                const reviewIssues=Array.isArray(result.issues)?result.issues:[];
+                                const hasHighlights=reviewIssues.some(x=>Number.isInteger(x.start)&&x.start>=0);
+                                promptCheckState={text:examinedText,sourceFingerprint:examinedFingerprint,
+                                    issues:reviewIssues,summary:result.summary||'',
+                                    rejectedCount:Number(result.rejected_count)||0,preview:hasHighlights};
+                                renderPromptCheck();
+                                inspectorResult.scrollIntoView({behavior:'smooth',block:'nearest'});
+                            }catch(err){alert('プロンプトチェックエラー: '+err.message);}
+                            finally{inspectorBtn.disabled=false;inspectorBtn.textContent='🔎 プロンプトをチェック';}
+                        });
+                        inspectorBtn.style.cssText='flex:0 0 auto;font-size:11px;padding:7px 12px;';
+                        const inspectorHint=directorElement('span','検査結果と赤字の確認表示のみ・本文は自動修正しません','');
+                        inspectorHint.style.cssText='font-size:10px;color:#9aa0a6;';
+                        inspectorActions.append(inspectorBtn,inspectorHint);
+                        const inspectorResult=document.createElement('div');
+                        inspectorResult.style.cssText='display:flex;flex-direction:column;gap:9px;';
+                        inspectorPanel.append(inspectorActions,inspectorResult);
+                        const renderPromptCheck=()=>{
+                            inspectorResult.replaceChildren();
+                            ta.style.display='block';
+                            const state=promptCheckState;
+                            if(!state || state.text!==ta.value || state.sourceFingerprint!==promptCheckFingerprint()){
+                                if(state)promptCheckState=null;
+                                return;
+                            }
+                            const toolbar=document.createElement('div');
+                            toolbar.style.cssText='display:flex;gap:8px;align-items:center;flex-wrap:wrap;';
+                            const locatedCount=state.issues.filter(x=>Number.isInteger(x.start)&&x.start>=0).length;
+                            const unlocatedCount=state.issues.length-locatedCount;
+                            const status=directorElement('div',state.issues.length?
+                                `✅ 根拠確認済み｜要確認 ${state.issues.filter(x=>x.severity==='warning').length}件 / 改善提案 ${state.issues.filter(x=>x.severity!=='warning').length}件 / 赤字・オレンジ表示 ${locatedCount}件`:
+                                '✅ チェック完了｜根拠を確認できる問題は検出されませんでした（指摘0件）');
+                            status.style.cssText='font-size:11px;font-weight:bold;color:#e2e8f0;';
+                            const toggle=directorButton(state.preview?'✏️ 編集に戻る':'🔴 赤字付きで確認',()=>{
+                                state.preview=!state.preview;renderPromptCheck();
+                            });
+                            toggle.style.cssText='flex:0 0 auto;font-size:10px;padding:6px 10px;';
+                            toggle.style.display=locatedCount?'block':'none';
+                            toolbar.append(status,toggle);inspectorResult.appendChild(toolbar);
+                            if(unlocatedCount){
+                                const notice=directorElement('div',
+                                    `※ ${unlocatedCount}件の指摘は、LLMの引用を原文と照合できなかったため赤字表示していません。下の指摘一覧で確認できます。`);
+                                notice.style.cssText='font-size:10px;color:#ffc477;white-space:pre-wrap;';
+                                inspectorResult.appendChild(notice);
+                            }
+                            if(state.rejectedCount){
+                                const dismissed=directorElement('div',
+                                    `🛡 原文による裏付けが取れなかったLLMの指摘 ${state.rejectedCount}件は採用していません。`);
+                                dismissed.style.cssText='font-size:10px;color:#a7b3c0;white-space:pre-wrap;';
+                                inspectorResult.appendChild(dismissed);
+                            }
+                            if(state.preview&&locatedCount){
+                                const note=directorElement('div','🔎 赤字・オレンジ色は注意箇所です。下の指摘をクリックすると該当箇所に移動します。編集する際は［編集に戻る］を押してください。');
+                                note.style.cssText='font-size:10px;color:#b4bac5;';
+                                inspectorResult.appendChild(note);
+                            }
+                            if(state.summary){
+                                const desc=directorElement('div',state.summary);
+                                desc.style.cssText='font-size:11px;color:#b8c2cc;white-space:pre-wrap;';
+                                inspectorResult.appendChild(desc);
+                            }
+                            let annotated=null;
+                            const marked=new Map();
+                            const drawAnnotated=()=>{
+                                if(!state.preview)return;
+                                ta.style.display='none';
+                                annotated=document.createElement('div');
+                                annotated.className='h3-prompt-textarea';
+                                annotated.style.cssText+='height:380px;overflow-y:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;';
+                                annotated.setAttribute('role','region');
+                                annotated.setAttribute('aria-label','注意箇所を赤字で示したプロンプト（読み取り専用）');
+                                let pos=0;
+                                const spans=[];
+                                state.issues.forEach((issue,index)=>{
+                                    spans.push({...issue,index,role:'main'});
+                                    const ev=issue.evidence;
+                                    if(ev && ev.scope==='prompt' && Number.isInteger(ev.start) && Number.isInteger(ev.end)){
+                                        spans.push({start:ev.start,end:ev.end,quote:ev.quote,index,
+                                            severity:issue.severity,message:issue.message,role:'support'});
+                                    }
+                                });
+                                const verified=spans.filter(x=>Number.isInteger(x.start)&&Number.isInteger(x.end)&&
+                                    x.start>=0&&x.end<=state.text.length&&x.end>x.start&&
+                                    state.text.slice(x.start,x.end)===x.quote)
+                                    .sort((a,b)=>a.start-b.start||b.end-a.end||
+                                        (a.role==='main'?-1:1));
+                                for(const item of verified){
+                                    if(item.start<pos)continue;
+                                    annotated.appendChild(document.createTextNode(state.text.slice(pos,item.start)));
+                                    const mark=document.createElement('span');
+                                    mark.textContent=state.text.slice(item.start,item.end);
+                                    mark.style.cssText=`color:${item.severity==='warning'?'#ff6b6b':'#ffba65'};font-weight:bold;text-decoration:underline;text-decoration-color:currentColor;`;
+                                    mark.title=(item.role==='support'?'比較根拠：':'指摘箇所：')+item.message;
+                                    mark.dataset.h3ReviewMarker=String(item.index);
+                                    mark.dataset.h3ReviewRole=item.role;
+                                    annotated.appendChild(mark);
+                                    if(item.role==='main' || !marked.has(item.index))marked.set(item.index,mark);
+                                    pos=item.end;
+                                }
+                                annotated.appendChild(document.createTextNode(state.text.slice(pos)));
+                                inspectorResult.appendChild(annotated);
+                            };
+                            drawAnnotated();
+                            if(!state.issues.length)return;
+                            const list=directorElement('div');
+                            list.style.cssText='display:flex;flex-direction:column;gap:7px;';
+                            state.issues.forEach((issue,index)=>{
+                                const item=directorElement('div');
+                                item.style.cssText=`border:1px solid ${issue.severity==='warning'?'#854242':'#65573c'};background:#16191e;border-radius:7px;padding:9px;display:flex;flex-direction:column;gap:5px;cursor:pointer;`;
+                                const heading=directorElement('div',`${issue.severity==='warning'?'⚠ 要確認':'ℹ 改善提案'}｜${issue.category||'表現'}`);
+                                heading.style.cssText=`font-weight:bold;color:${issue.severity==='warning'?'#ff7878':'#ffc477'};font-size:11px;`;
+                                const message=directorElement('div',issue.message||'');
+                                message.style.cssText='font-size:11px;color:#e0e0e0;white-space:pre-wrap;';
+                                item.append(heading,message);
+                                const primary=directorElement('div','📍 指摘箇所（プロンプト原文）：'+(issue.quote||''));
+                                primary.style.cssText='font-size:10px;color:#ffd4d4;white-space:pre-wrap;overflow-wrap:anywhere;';
+                                item.appendChild(primary);
+                                const evidence=issue.evidence;
+                                if(evidence && evidence.quote){
+                                    const evidenceLabel=evidence.scope==='user'?'ユーザー指定の根拠':'比較対象（プロンプト原文）';
+                                    const support=directorElement('div',`📎 ${evidenceLabel}：${evidence.quote}`);
+                                    support.style.cssText='font-size:10px;color:#b5d5f6;white-space:pre-wrap;overflow-wrap:anywhere;';
+                                    item.appendChild(support);
+                                }
+                                if(issue.suggestion){
+                                    const suggestion=directorElement('div','参考：'+issue.suggestion);
+                                    suggestion.style.cssText='font-size:10px;color:#a7b3c0;white-space:pre-wrap;';
+                                    item.appendChild(suggestion);
+                                }
+                                if(Number.isInteger(issue.start)&&issue.start>=0){
+                                    item.title='クリックで該当するプロンプト部分へ移動';
+                                    item.onclick=()=>{
+                                        state.preview=true;
+                                        renderPromptCheck();
+                                        const target=inspectorResult.querySelectorAll('[data-h3-review-marker]');
+                                        const found=Array.from(target).find(x=>Number(x.dataset.h3ReviewMarker)===index&&
+                                            x.dataset.h3ReviewRole==='main')||
+                                            Array.from(target).find(x=>Number(x.dataset.h3ReviewMarker)===index);
+                                        if(found)found.scrollIntoView({behavior:'smooth',block:'center'});
+                                    };
+                                }else{
+                                    item.style.cursor='default';
+                                    item.title='指摘は有効ですが、原文位置は特定できませんでした';
+                                    const noMark=directorElement('div','※原文位置を特定できなかったため、赤字表示はありません。');
+                                    noMark.style.cssText='font-size:10px;color:#ffc477;';
+                                    item.appendChild(noMark);
+                                }
+                                list.appendChild(item);
+                            });
+                            inspectorResult.appendChild(list);
+                        };
                         const applyBaseLockState = () => {
                             if (baseLockChk.checked) {
                                 ta.readOnly = true; ta.style.opacity = "0.5"; ta.style.pointerEvents = "none";
@@ -2658,6 +3314,7 @@ app.registerExtension({
                                 if (data.success && data.prompt) {
                                     ta.value = data.prompt;
                                     ta.oninput();
+                                    promptCheckState=null;renderPromptCheck();
                                 } else { 
                                     alert("プロンプト生成エラー: " + (data.error || "不明なエラー")); 
                                 }
@@ -2835,6 +3492,7 @@ app.registerExtension({
                                 if (data.success) {
                                     if (data.prompt) {
                                         ta.value = data.prompt;
+                                        promptCheckState=null;renderPromptCheck();
                                         if (customWidget) {
                                             customWidget.value = data.prompt;
                                             if (customWidget.callback) customWidget.callback(data.prompt);
@@ -2868,9 +3526,112 @@ app.registerExtension({
                             }
                         };
 
-                        contentArea.append(titlePrompt, genBtn, banner, baseHeader, ta, clipResContainer);
+                        if(promptCheckState && (promptCheckState.text!==ta.value ||
+                           promptCheckState.sourceFingerprint!==promptCheckFingerprint()))promptCheckState=null;
+                        renderPromptCheck();
+                        contentArea.append(titlePrompt, genBtn, banner, baseHeader, ta, inspectorPanel, clipResContainer);
                         
                     } else if (activeTab === "cache") {
+                        const resetBox = document.createElement("div");
+                        resetBox.style.cssText = "background:#141416;border:1px solid #383838;border-radius:8px;padding:12px;margin-bottom:14px;";
+                        const resetTitle = document.createElement("div");
+                        resetTitle.textContent = "入力内容の消去";
+                        resetTitle.style.cssText = "font-size:13px;font-weight:bold;color:#ffffff;margin-bottom:7px;";
+                        const resetNote = document.createElement("div");
+                        resetNote.textContent = "消去したいタブにチェックを入れてください。チェックを外したタブの入力は保持します。";
+                        resetNote.style.cssText = "font-size:11px;color:#9aa0a6;line-height:1.6;margin-bottom:9px;";
+                        const resetGrid = document.createElement("div");
+                        resetGrid.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-bottom:9px;";
+                        const resetChecks = {};
+                        for (const section of H3_RESET_SECTIONS) {
+                            const label = document.createElement("label");
+                            label.style.cssText = "display:flex;align-items:center;gap:7px;background:#202020;border:1px solid #383838;border-radius:8px;padding:8px 9px;color:#dbe0e6;font-size:11px;font-weight:600;cursor:pointer;min-width:0;";
+                            const checkbox = document.createElement("input");
+                            checkbox.type = "checkbox";
+                            checkbox.checked = !!h3ResetSelection[section.id];
+                            checkbox.style.cssText = "accent-color:#007acc;width:15px;height:15px;flex-shrink:0;cursor:pointer;";
+                            checkbox.onchange = () => {
+                                h3ResetSelection[section.id] = checkbox.checked;
+                                updateResetButton();
+                            };
+                            label.append(checkbox, document.createTextNode(section.label));
+                            resetGrid.appendChild(label);
+                            resetChecks[section.id] = checkbox;
+                        }
+                        const selectControls = document.createElement("div");
+                        selectControls.style.cssText = "display:flex;gap:12px;justify-content:flex-end;margin-bottom:9px;";
+                        for (const [text, checked] of [["全選択", true], ["全解除", false]]) {
+                            const button = document.createElement("button");
+                            button.type = "button";
+                            button.textContent = text;
+                            button.style.cssText = "background:none;border:none;padding:2px;color:#9aa0a6;text-decoration:underline;font-size:10px;cursor:pointer;";
+                            button.onclick = () => {
+                                for (const section of H3_RESET_SECTIONS) {
+                                    h3ResetSelection[section.id] = checked;
+                                    resetChecks[section.id].checked = checked;
+                                }
+                                updateResetButton();
+                            };
+                            selectControls.appendChild(button);
+                        }
+                        const resetHint = document.createElement("div");
+                        resetHint.textContent = "※ メディアボックスの割り当ては［キャラクター設定］に含まれます。LLM設定・Irodori-TTS設定、アップロード済みファイルは消去しません。";
+                        resetHint.style.cssText = "font-size:10px;color:#8b949e;line-height:1.5;margin-bottom:10px;";
+                        const resetBtn = document.createElement("button");
+                        resetBtn.type = "button";
+                        resetBtn.style.cssText = "width:100%;background:#a33442;border:1px solid #d96774;border-radius:5px;color:white;padding:10px;font-size:12px;font-weight:bold;cursor:pointer;";
+                        const updateResetButton = () => {
+                            const count = H3_RESET_SECTIONS.filter(s => h3ResetSelection[s.id]).length;
+                            resetBtn.disabled = count === 0;
+                            resetBtn.textContent = count ? `🗑 選択した${count}項目を消去` : "消去する項目を選択してください";
+                            resetBtn.style.opacity = count ? "1" : "0.45";
+                            resetBtn.style.cursor = count ? "pointer" : "not-allowed";
+                        };
+                        updateResetButton();
+                        resetBtn.onclick = () => {
+                            const selected = Object.fromEntries(H3_RESET_SECTIONS.map(s => [s.id, !!h3ResetSelection[s.id]]));
+                            const labels = H3_RESET_SECTIONS.filter(s => selected[s.id]).map(s => `・${s.label}`);
+                            if (!labels.length) return;
+                            if (!window.confirm(`次の入力内容を新規配置時の状態に戻します。\n\n${labels.join("\n")}\n\nチェックしていない項目は保持します。\nこの操作は取り消せません。実行しますか？`)) return;
+
+                            h3ResetSelectedWidgets(wMap, h3FreshWidgetValues, selected);
+                            if (selected.cast) {
+                                state = h3ParseClipSettings(wMap.timeline_data?.value);
+                                if (!Array.isArray(state.items)) state.items = [];
+                                activeSlotConfig = null;
+                                fileInput.value = "";
+                                for (let i = 1; i <= 5; i++) {
+                                    charEnabledState[i] = !!wMap[`char${i}_enabled`]?.value;
+                                    syncRefModRemote(i, "None");
+                                }
+                                renderFixedMediaLanes();
+                            }
+                            if (selected.timeline) {
+                                for (let i = 1; i <= 4; i++) shotEnabledState[i] = !!wMap[`shot${i}_enabled`]?.value;
+                                pendingDirectorPatch = null;
+                                directorHistory = [];
+                            }
+                            if (selected.clip) {
+                                clipData = h3ParseClipSettings(wMap.clips_data_json?.value);
+                                for (let i = 1; i <= 10; i++) {
+                                    clipEnabledState[i] = !!wMap[`c${i}_enabled`]?.value;
+                                    for (let j = 1; j <= 4; j++) clipShotEnabledState[i][j] = !!wMap[`c${i}_s${j}_enabled`]?.value;
+                                }
+                                activeClipTab = 1;
+                            } else if (selected.prompt) {
+                                clipData = h3ParseClipSettings(wMap.clips_data_json?.value);
+                            }
+                            if (selected.auto) {
+                                const freshAuto = h3ParseClipSettings(wMap.auto_data?.value);
+                                autoState = {enabled:false,directorMode:"detailed",overwrite:false,noClips:false,duration:5,clipCount:1,story:"",...freshAuto};
+                            }
+                            if (selected.prompt) promptCheckState = null;
+                            lastFocusedInput = null;
+                            renderTabContent();
+                            node.setDirtyCanvas(true, true);
+                        };
+                        resetBox.append(resetTitle, resetNote, resetGrid, selectControls, resetHint, resetBtn);
+                        contentArea.appendChild(resetBox);
                         const card = document.createElement("div"); 
                         card.className = "h3-char-card";
                         card.style.cssText = "background:transparent; border:none; padding:0;";
