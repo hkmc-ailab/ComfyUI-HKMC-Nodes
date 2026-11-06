@@ -43,7 +43,7 @@ non_diegetic_music:
   Identify the relevant characters/people, the setting, and the overall sequence of events using the supplied stage and overall synopsis. Preserve <Subject X> labels where applicable.
   Subject roles identify categories only: a character being configured does NOT require that character to appear in every shot. Follow the actual shot instructions for on-screen presence, dialogue, and absences.
   Treat a background Subject as a possible stage. If exactly one background Subject exists, associate it with the stage when consistent with the supplied text. If multiple background Subjects exist, follow the supplied stage, synopsis, and shot order; never invent a location sequence. Do not assume that an object Subject is a location.
-  Translate the overall synopsis faithfully into English, without inventing events, extra characters, or new plot developments. Never use Movement & Timing as a source of summary events: that field belongs ONLY to detailed_description. Never include phrases such as "in the first shot", "in the second shot", "the camera pans", "zoom in", or shot-specific framing, camera directions, timecodes, dialogue, or expressions absent from the synopsis. If the synopsis is short, the summary must stay short. Do not repeat full physical definitions.
+  Translate the overall synopsis faithfully into English, without inventing events, extra characters, or new plot developments. Preserve the intended sequence of key actions when they are central to the synopsis. Keep important tool / container distinctions exact when they matter (for example, おたま = ladle, 小皿 = small plate; do not collapse them into a generic spoon or dish if that changes meaning). Preserve who acts on what and where things are transferred when those relations are explicit. Never use Movement & Timing as a source of summary events: that field belongs ONLY to detailed_description. Never include phrases such as "in the first shot", "in the second shot", "the camera pans", "zoom in", or shot-specific framing, camera directions, timecodes, dialogue, or expressions absent from the synopsis. If the synopsis is short, the summary must stay short. Do not repeat full physical definitions.
   Only emit media reference tags that are explicitly provided; never output "None", "null", or placeholder text as a media reference. Character media-reference declarations are assembled by Python from GUI selections.
 {creative_instruction}
 
@@ -54,6 +54,9 @@ non_diegetic_music:
   Translate each shot's camera work and actions STRICTLY and CONCISELY based ONLY on the user input.
   Keep each header format exactly as `[Shot X | Time]`.
   DO NOT invent unmentioned actions, emotions, or camera angles.
+  Preserve object/tool distinctions and action relationships exactly. If the source says おたまでスープをすくい、小皿に移す, render that faithfully as scooping with a ladle and transferring/pouring into a small plate; do not rewrite it as tasting from a spoon or transferring to a hand.
+  When one shot contains multiple beats or camera changes, express them in the same order using natural connectors such as Then / Afterward / Next where needed.
+  Preserve handedness, source/target relationships, and who is being shown from whose point of view when explicit.
   Preserve all `<Subject X>` and `<Audio X>` tags verbatim within the action text.
 
 - overall_soundscape:
