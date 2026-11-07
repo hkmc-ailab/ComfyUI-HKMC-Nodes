@@ -193,6 +193,52 @@ function syncRefModRemote(slotIndex, modName) {
     }
 }
 
+const h3BackgroundRoots = new Set();
+let h3BackgroundTimer = null;
+let h3BackgroundRequestRunning = false;
+let h3BackgroundCurrentUrl = "";
+
+function h3ApplyBackground(root, url) {
+    root.classList.toggle("h3-has-background", !!url);
+    if (url) root.style.setProperty("--h3-background-image", `url("${url}")`);
+    else root.style.removeProperty("--h3-background-image");
+}
+
+async function h3RefreshBackground() {
+    if (!h3BackgroundRoots.size || h3BackgroundRequestRunning) return;
+    h3BackgroundRequestRunning = true;
+    try {
+        const response = await api.fetchApi("/h3/node_background/status", { cache: "no-store" });
+        if (!response.ok) return;
+        const status = await response.json();
+        const version = typeof status.version === "string" && /^\d+-\d+$/.test(status.version)
+            ? status.version : "";
+        const url = status.enabled && version
+            ? `/h3/node_background?v=${encodeURIComponent(version)}` : "";
+        if (url === h3BackgroundCurrentUrl) return;
+        h3BackgroundCurrentUrl = url;
+        for (const root of h3BackgroundRoots) h3ApplyBackground(root, url);
+    } catch (_) {
+    } finally {
+        h3BackgroundRequestRunning = false;
+    }
+}
+
+function h3SubscribeBackground(root) {
+    h3BackgroundRoots.add(root);
+    h3ApplyBackground(root, h3BackgroundCurrentUrl);
+    h3RefreshBackground();
+    if (h3BackgroundTimer === null) h3BackgroundTimer = setInterval(h3RefreshBackground, 8000);
+}
+
+function h3UnsubscribeBackground(root) {
+    h3BackgroundRoots.delete(root);
+    if (!h3BackgroundRoots.size && h3BackgroundTimer !== null) {
+        clearInterval(h3BackgroundTimer);
+        h3BackgroundTimer = null;
+    }
+}
+
 function installStudioStyles() {
     if (document.getElementById("h3-studio-styles")) return;
     const style = document.createElement("style");
@@ -210,6 +256,28 @@ function installStudioStyles() {
             border-radius: 8px;
             overflow: hidden;
             position: relative;
+        }
+        .h3-studio-container.h3-has-background::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background-image: var(--h3-background-image);
+            background-size: cover;
+            background-position: center center;
+            background-repeat: no-repeat;
+            opacity: 0.38;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .h3-studio-container > * {
+            position: relative;
+            z-index: 1;
+        }
+        .h3-studio-container.h3-has-background .h3-tab-bar,
+        .h3-studio-container.h3-has-background .h3-tab-content,
+        .h3-studio-container.h3-has-background .h3-fixed-media-area,
+        .h3-studio-container.h3-has-background .h3-media-body {
+            background: transparent;
         }
         .h3-tab-bar {
             display: flex;
@@ -1039,6 +1107,7 @@ app.registerExtension({
 
                 const root = document.createElement("div");
                 root.className = "h3-studio-container";
+                h3SubscribeBackground(root);
 
                 const GUI_Y_OFFSET = -14;
                 root.style.transform = `translateY(${GUI_Y_OFFSET}px)`;
@@ -3964,6 +4033,7 @@ app.registerExtension({
                     document.removeEventListener("h3_seeds_updated", onH3SeedsUpdated);
                     if (h3SeedRefreshFrame !== null) cancelAnimationFrame(h3SeedRefreshFrame);
                     if (h3DragCleanup) h3DragCleanup();
+                    h3UnsubscribeBackground(root);
                     if (originalOnRemoved) return originalOnRemoved.apply(this, args);
                 };
             };
