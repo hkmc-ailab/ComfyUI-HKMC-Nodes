@@ -17,6 +17,47 @@ import scipy.io.wavfile as wavfile
 from server import PromptServer
 from aiohttp import web
 
+_H3_BACKGROUND_FOLDER = os.path.join(os.path.dirname(__file__), "backgrounds")
+_H3_BACKGROUND_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _h3_find_background_image():
+    """Pick the most recently modified image from this node's backgrounds folder."""
+    try:
+        os.makedirs(_H3_BACKGROUND_FOLDER, exist_ok=True)
+        candidates = []
+        for entry in os.scandir(_H3_BACKGROUND_FOLDER):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if os.path.splitext(entry.name)[1].lower() not in _H3_BACKGROUND_EXTENSIONS:
+                continue
+            stat = entry.stat(follow_symlinks=False)
+            candidates.append((stat.st_mtime_ns, entry.name.lower(), entry.path, stat.st_size))
+        if candidates:
+            modified, _, path, size = max(candidates)
+            return path, f"{modified}-{size}"
+    except OSError:
+        pass
+    return None, ""
+
+
+@PromptServer.instance.routes.get("/h3/node_background/status")
+async def h3_node_background_status(request):
+    path, version = _h3_find_background_image()
+    return web.json_response(
+        {"enabled": path is not None, "version": version},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@PromptServer.instance.routes.get("/h3/node_background")
+async def h3_node_background_image(request):
+    path, _ = _h3_find_background_image()
+    if path is None:
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+
 def get_refmod_files():
     models_dir = folder_paths.models_dir
     refmod_dir = os.path.join(models_dir, "refmods")
