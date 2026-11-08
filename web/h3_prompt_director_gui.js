@@ -406,6 +406,51 @@ function installStudioStyles() {
             box-sizing: border-box;
             background: #000000;
         }
+        /* Collapsible widgets: applies to Timeline, Scene and Clip only. */
+        .h3-collapse-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            min-height: 25px;
+        }
+        .h3-collapse-header > .h3-char-title,
+        .h3-collapse-header > label {
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+        .h3-collapse-toggle {
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            flex: 0 0 27px;
+            width: 27px;
+            height: 25px;
+            padding: 0;
+            margin-left: auto;
+            border: 1px solid #454a50;
+            border-radius: 6px;
+            background: #22262b;
+            color: #e9edf3;
+            font-size: 13px;
+            font-weight: bold;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .h3-collapse-toggle:hover {
+            background: #303943;
+            border-color: #5bb3f5;
+        }
+        .h3-collapse-toggle:focus-visible {
+            outline: 2px solid #5bb3f5;
+            outline-offset: 2px;
+        }
+        .h3-collapse-body {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 0;
+        }
         .h3-char-card {
             background: transparent;
             border: 1px solid #555860;
@@ -1077,6 +1122,62 @@ app.registerExtension({
                     if (wMap["auto_data"]) {
                         wMap["auto_data"].value = JSON.stringify(autoState);
                     }
+                };
+
+                if (!autoState.uiCollapsed || typeof autoState.uiCollapsed !== "object" ||
+                    Array.isArray(autoState.uiCollapsed)) autoState.uiCollapsed = {};
+
+                const makeCollapsible = (card, key, heading = null) => {
+                    const header = document.createElement("div");
+                    header.className = "h3-collapse-header";
+                    let title = heading;
+                    if (!title) {
+                        title = Array.from(card.children).find(child => child.classList?.contains("h3-char-title"));
+                    }
+                    if (title) {
+                        title.remove();
+                        header.appendChild(title);
+                    }
+                    const toggle = document.createElement("button");
+                    toggle.type = "button";
+                    toggle.className = "h3-collapse-toggle";
+                    const body = document.createElement("div");
+                    body.className = "h3-collapse-body";
+                    body.id = `h3-fold-${node.id}-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+                    while (card.firstChild) body.appendChild(card.firstChild);
+                    header.appendChild(toggle);
+                    card.append(header, body);
+                    const setCollapsed = (collapsed, store = true) => {
+                        body.style.display = collapsed ? "none" : "flex";
+                        toggle.textContent = collapsed ? "▼" : "▲";
+                        toggle.setAttribute("aria-expanded", String(!collapsed));
+                        toggle.setAttribute("aria-label", `${title?.textContent?.trim() || key}を${collapsed ? "開く" : "閉じる"}`);
+                        toggle.title = collapsed ? "開く" : "閉じる";
+                        if (store) {
+                            autoState.uiCollapsed[key] = collapsed;
+                            saveAutoState();
+                        }
+                    };
+                    toggle.setAttribute("aria-controls", body.id);
+                    toggle.onclick = (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setCollapsed(body.style.display !== "none");
+                    };
+                    const initiallyCollapsed = Object.prototype.hasOwnProperty.call(autoState.uiCollapsed, key)
+                        ? autoState.uiCollapsed[key] === true : key === "timeline-ai-revision";
+                    setCollapsed(initiallyCollapsed, false);
+                    return { header, body, toggle, setCollapsed };
+                };
+
+                const sceneFieldCard = (widgetName, label, multiline, placeholder) => {
+                    const row = bindInput(widgetName, label, multiline, placeholder);
+                    const card = document.createElement("div");
+                    card.className = "h3-char-card";
+                    const title = row.querySelector(":scope > label");
+                    card.appendChild(row);
+                    makeCollapsible(card, `scene-${widgetName}`, title);
+                    return card;
                 };
 
                 let activeTab = "cast";
@@ -1817,7 +1918,7 @@ app.registerExtension({
                                 story:currentStory,shot_count:oldCount,names:getDirectorNames()});
                             if(d.story.trim()!==currentStory || d.count!==oldCount ||
                                 d.shots.slice(0,oldCount).some((x,i)=>x.story!==previous[i])){
-                                alert('LLM処理中にあらすじかショット欄が変更されました。結果を反映せず破棄しました。');return;
+                                alert('LLM処理中にあらすじかショット欄が変更されました。結果を反映せずキャンセルしました。');return;
                             }
                             if(!Array.isArray(result.shots)||result.shots.length!==oldCount||
                                result.shots.some(x=>typeof x!=='string'||!x.trim()))throw Error('ショット構成の返答が不正です');
@@ -1894,13 +1995,18 @@ app.registerExtension({
                 };
                 const renderDirectorRevision = (host) => {
                     const card=directorElement('div','','h3-char-card');
-                    card.appendChild(directorElement('div','AI部分修正｜現在のタイムラインを維持して変更','h3-char-title'));
+                    card.appendChild(directorElement('div','AI部分修正｜ショットの演出を考案・改稿','h3-char-title'));
+                    card.appendChild(directorElement('div','既存の出来事を保ちながら、アングル・カメラワーク・モーションを日本語のショット文章に具体化します。セリフや時間は変更しません。','h3-guided-intro'));
                     const target=document.createElement('select');target.style.cssText='background:#222;color:#eee;padding:6px;border:1px solid #555;';
                     for(const [value,name] of [['auto','自動判定'],['1','ショット1'],['2','ショット2'],['3','ショット3'],['4','ショット4']]) {
                         const opt=document.createElement('option');opt.value=value;opt.textContent=name;target.appendChild(opt);
                     }
+                    target.value = autoState.revisionTarget || 'auto';
+                    target.onchange = () => {autoState.revisionTarget = target.value;saveAutoState();};
                     card.appendChild(target);
-                    const ta=directorTextArea('','例：ショット2のカメラだけ旋回に変えて。他の要素はそのまま。',()=>{},3);
+                    const ta=directorTextArea(autoState.revisionInstruction || '',
+                        '例：もっとスタイリッシュに。ミディアム→顔のアップ→走り去る背中のロングショットのように、カメラと動きを加えて。',
+                        v=>{autoState.revisionInstruction=v;saveAutoState();},4);
                     card.appendChild(ta);
                     const actions=directorElement('div');actions.style.cssText='display:flex;gap:6px;';
                     const propose=directorButton('変更案を作成',async()=>{
@@ -1908,13 +2014,16 @@ app.registerExtension({
                         propose.disabled=true;propose.textContent='⏳ 修正案を考えています...';
                         try{
                             const before=directorSnapshot();
+                            if(target.value!=='auto' && !before[Number(target.value)-1]?.enabled) {
+                                throw Error('指定したショットが無効です。タイムラインで有効にしてください。');
+                            }
                             const res=await directorRequest('/h3/interactive_base_revise',{
-                                shots:before,target:target.value,instruction:ta.value,names:getDirectorNames()});
+                                shots:before,target:target.value,instruction:ta.value,
+                                names:getDirectorNames(),overall_story:String(wMap.overall_story?.value||'')});
                             const changes=[];
                             for(const c of res.changes){changes.push({...c,value:c.field==='action'?await directorConvert(c.value):c.value});}
-                            pendingDirectorPatch={before,changes};
+                            pendingDirectorPatch={before,changes,warning:res.warning||''};
                             showPreview();
-                            if(res.warning)alert(res.warning);
                         }catch(e){alert('AI部分修正エラー: '+e.message);}
                         finally{propose.disabled=false;propose.textContent='変更案を作成';}
                     });
@@ -1932,6 +2041,7 @@ app.registerExtension({
                         if(!pendingDirectorPatch)return;
                         if(!pendingDirectorPatch.changes.length){preview.appendChild(directorElement('div','変更対象が見つかりませんでした。指示を具体的にしてください。'));return;}
                         preview.appendChild(directorElement('div','変更前 → 変更後（承認するまでタイムラインは変わりません）'));
+                        if (pendingDirectorPatch.warning) preview.appendChild(directorElement('div',`注意：${pendingDirectorPatch.warning}`,'h3-guided-intro'));
                         for(const c of pendingDirectorPatch.changes){
                             const n=directorElement('div',`ショット${c.shot} / ${c.field}\n【変更前】${pendingDirectorPatch.before[c.shot-1][c.field]}\n【変更後】${c.value}`);
                             n.style.cssText='background:#1b1d22;border:1px solid #444;padding:8px;border-radius:6px;font-size:11px;';preview.appendChild(n);
@@ -1946,10 +2056,12 @@ app.registerExtension({
                             directorHistory.push(pendingDirectorPatch.before);if(directorHistory.length>20)directorHistory.shift();
                             directorApplySnapshot(next);pendingDirectorPatch=null;renderTabContent();
                         }));
-                        row.appendChild(directorButton('破棄',()=>{pendingDirectorPatch=null;showPreview();}));
+                        row.appendChild(directorButton('キャンセル',()=>{pendingDirectorPatch=null;showPreview();}));
                         preview.appendChild(row);
                     };
-                    showPreview();host.appendChild(card);
+                    showPreview();
+                    makeCollapsible(card, "timeline-ai-revision");
+                    host.appendChild(card);
                 };
 
                 const renderTabContent = () => {
@@ -2039,6 +2151,7 @@ app.registerExtension({
                         }
 
                     } else if (activeTab === "timeline") {
+                        renderDirectorRevision(contentArea);
                         const toggleBar = document.createElement("div");
                         toggleBar.className = "h3-top-toggle-bar";
 
@@ -2096,6 +2209,7 @@ app.registerExtension({
                             const diaBlock = createDialogueWithSpeaker(`shot${i}`, i===1 ? "S1" : "None");
 
                             card.append(title, timeRow, tagBar, actionRow, diaBlock);
+                            makeCollapsible(card, `timeline-shot-${i}`);
                             contentArea.appendChild(card);
                             shotCards[i] = card;
                         }
@@ -2197,13 +2311,16 @@ app.registerExtension({
                             row.append(header, input);
                             subjectBox.appendChild(row);
                         }
-                        contentArea.appendChild(subjectBox);
+                        makeCollapsible(subjectBox, "scene-subject-definitions");
+                        const retentionCard = createRetentionSettings();
+                        makeCollapsible(retentionCard, "scene-retention-settings");
                         contentArea.append(
-                            bindInput("overall_story", "全体のあらすじ（summary）", true, "場所・時間帯・登場人物・出来事・物語の流れを日本語で入力（LLMが英訳）"),
-                            bindInput("quality_control", "禁止事項＆スタイル維持（retention_analysis）", true, "崩れ防止、画風維持、3D化禁止などのネガティブ・クオリティ指示を入力"),
-                            createRetentionSettings(),
-                            bindInput("ambient_sound", "環境音 (overall_soundscape)", false, "足音、風の音、ドアの開閉音、雨音などの環境音・効果音を入力"),
-                            bindInput("bgm", "BGM (non_diegetic_music)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
+                            subjectBox,
+                            sceneFieldCard("overall_story", "全体のあらすじ（summary）", true, "場所・時間帯・登場人物・出来事・物語の流れを日本語で入力（LLMが英訳）"),
+                            sceneFieldCard("quality_control", "禁止事項＆スタイル維持（retention_analysis）", true, "崩れ防止、画風維持、3D化禁止などのネガティブ・クオリティ指示を入力"),
+                            retentionCard,
+                            sceneFieldCard("ambient_sound", "環境音 (overall_soundscape)", false, "足音、風の音、ドアの開閉音、雨音などの環境音・効果音を入力"),
+                            sceneFieldCard("bgm", "BGM (non_diegetic_music)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
                         );
 
                     } else if (activeTab === "clip") {
@@ -2390,10 +2507,14 @@ app.registerExtension({
                             const diaBlock = createDialogueWithSpeaker(`c${activeClipTab}_s${j}`, j===1 ? "S1" : "None");
 
                             card.append(cardTitle, timeRow, tagBar, actionRow, diaBlock);
+                            makeCollapsible(card, `clip-${activeClipTab}-shot-${j}`);
                             editorContainer.appendChild(card);
                         }
 
                         activeClipCard.appendChild(editorContainer);
+                        makeCollapsible(activeClipCard, `clip-${activeClipTab}-editor`, titleBar);
+                        titleBar.style.marginBottom = "0";
+                        titleBar.style.flex = "1 1 auto";
                         contentArea.appendChild(activeClipCard);
 
                     } else if (activeTab === "auto") {

@@ -1,4 +1,3 @@
-// h3_prompt_director_mv.js
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
@@ -586,7 +585,7 @@ app.registerExtension({
 
                         const audioOptions = [
                             { value: "auto", label: "自動判別 (Geminiなら直接音源解析 / その他はPython波形解析)" },
-                            { value: "gemini_audio", label: "❌️Gemini 直接音源解析 (音を耳で聴いてボーカル・展開を判別)" },
+                            { value: "gemini_audio", label: "Gemini 直接音源解析 (音を耳で聴いてボーカル・展開を判別)" },
                             { value: "python_wave", label: "Python 波形エネルギー解析 (Ollama/ChatGPT向け)" }
                         ];
                         analysisBlock.appendChild(bindVSelect("audio_analysis_mode", "解析モードの選択", audioOptions, "auto"));
@@ -1244,4 +1243,3 @@ app.registerExtension({
         }
     }
 });
-// === END OF FILE ===
