@@ -2,7 +2,6 @@ import os
 import re
 import json
 import requests
-import google.generativeai as genai
 from openai import OpenAI
 import nodes
 from server import PromptServer
@@ -167,7 +166,7 @@ class AnimaPromptDirector:
                 
                 "llm_provider": (["None (Raw Tag)", "Gemini (Cloud)", "ChatGPT (OpenAI)", "Ollama (Local)"], {"default": "None (Raw Tag)", "label": "[LLM] プロバイダー"}),
                 "llm_api_key": ("STRING", {"default": "", "multiline": False, "label": "[LLM] API_Key"}),
-                "llm_model": ("STRING", {"default": "gemini-2.5-flash", "multiline": False, "label": "[LLM] モデル名"}),
+                "llm_model": ("STRING", {"default": "gemini-3.8-flash", "multiline": False, "label": "[LLM] モデル名"}),
                 "creative_mode": (["オフ", "控えめ (光・空気感)", "リッチ (小物・情景追加)"], {"default": "オフ", "label": "[LLM] 演出/あそび"}),
                 "convert_all_to_natural": ("BOOLEAN", {"default": False, "label_on": "ON", "label_off": "OFF", "label": "全て自然言語に変換"}),
                 
@@ -391,27 +390,50 @@ class AnimaPromptDirector:
 
         def invoke(instruction, source, attempt):
             if provider == "Gemini (Cloud)":
-                key = api_key.strip() or os.getenv("GEMINI_API_KEY")
+                try:
+                    from google import genai
+                    from google.genai import types
+                except ImportError as exc:
+                    raise RuntimeError("Geminiには google-genai が必要です。ComfyUIのPython環境で python -m pip install -U google-genai を実行してください。") from exc
+                key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
                 if not key:
                     raise ValueError("GeminiのAPIキーが設定されていません。")
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel(model_name.strip() or "gemini-2.5-flash")
-                result = model.generate_content(f"{instruction}\n\nUser Input: {source}")
-                return (getattr(result, "text", None) or "").strip()
+                target_model = (model_name or "").strip().removeprefix("models/") or "gemini-3.8-flash"
+                try:
+                    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=180000)) as client:
+                        result = client.models.generate_content(
+                            model=target_model,
+                            contents=f"{instruction}\n\nUser Input: {source}",
+                        )
+                    output = (result.text or "").strip()
+                    if not output:
+                        raise RuntimeError("Geminiが空の応答を返しました。")
+                    return output
+                except Exception as exc:
+                    raise RuntimeError(f"Gemini APIエラー（モデル: {target_model}）: {exc}") from exc
             if provider == "ChatGPT (OpenAI)":
-                key = api_key.strip() or os.getenv("OPENAI_API_KEY")
+                key = (api_key or os.getenv("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
                 if not key:
                     raise ValueError("OpenAIのAPIキーが設定されていません。")
-                client = OpenAI(api_key=key, timeout=180.0)
-                result = client.chat.completions.create(
-                    model=model_name.strip() or "gpt-4o-mini",
-                    messages=[
+                target_model = (model_name or "").strip() or "gpt-4o-mini"
+                params = {
+                    "model": target_model,
+                    "messages": [
                         {"role": "system", "content": instruction},
                         {"role": "user", "content": source},
                     ],
-                    temperature=0.2 if attempt > 1 else (0.7 if creative_mode != "オフ" else 0.3),
-                )
-                return (result.choices[0].message.content or "").strip()
+                }
+                if not re.match(r"^(?:o[1-9](?:-|$)|gpt-[56](?:\.|-|$))", target_model, re.I):
+                    params["temperature"] = 0.2 if attempt > 1 else (0.7 if creative_mode != "オフ" else 0.3)
+                try:
+                    client = OpenAI(api_key=key, timeout=180.0, max_retries=2)
+                    result = client.chat.completions.create(**params)
+                    output = (result.choices[0].message.content or "").strip()
+                    if not output:
+                        raise RuntimeError("OpenAIが空の応答を返しました。")
+                    return output
+                except Exception as exc:
+                    raise RuntimeError(f"OpenAI APIエラー（モデル: {target_model}）: {exc}") from exc
             if provider == "Ollama (Local)":
                 target_model = model_name.strip() or "qwen3.5:9b"
                 payload = {

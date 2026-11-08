@@ -251,77 +251,71 @@ def contains_japanese(text):
 
 def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None, json_schema=None):
     if provider == "Gemini (Cloud)":
-        raw_key = api_key if (api_key and api_key.strip()) else (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
-        active_key = raw_key.strip().strip('"').strip("'").strip()
+        # google-genai is the maintained Google SDK (not google-generativeai).
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise RuntimeError(
+                "Geminiを利用するにはComfyUIのPython環境へ google-genai をインストールしてください: "
+                "python -m pip install -U google-genai"
+            ) from exc
 
+        active_key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
         if not active_key:
-            raise ValueError("Gemini API Key is missing. Please set it in the UI or as an environment variable (GEMINI_API_KEY or GOOGLE_API_KEY).")
-
-        raw_model = model_name.strip() if model_name and model_name.strip() else "gemini-2.5-flash"
-        clean_model = raw_model.replace("models/", "").strip()
-        
-        parts = [{"text": sys_inst}]
-        if audio_path and os.path.exists(audio_path):
-            try:
-                guessed_mime, _ = mimetypes.guess_type(audio_path)
-                audio_mime = guessed_mime or "audio/wav"
-                with open(audio_path, "rb") as f:
-                    raw_audio_bytes = f.read()
-                b64_audio = base64.b64encode(raw_audio_bytes).decode("utf-8")
-                parts.append({
-                    "inline_data": {
-                        "mime_type": audio_mime,
-                        "data": b64_audio
-                    }
-                })
-            except Exception as e:
-                print(f"[H3 Prompt Director] 音声読み込みエラー: {e}")
-
-        payload = {
-            "contents": [{"parts": parts}],
-            "generationConfig": {"temperature": temp}
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": active_key
-        }
-
-        api_versions = ["v1beta", "v1"]
-        last_res = None
-
-        for ver in api_versions:
-            url = f"https://generativelanguage.googleapis.com/{ver}/models/{clean_model}:generateContent"
-            res = requests.post(url, headers=headers, json=payload, timeout=600)
-            last_res = res
-
-            if res.status_code == 200:
-                try:
-                    return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                except Exception as parse_e:
-                    raise RuntimeError(f"Geminiレスポンス解析エラー: {parse_e}")
-            elif res.status_code == 404:
-                continue
-            else:
-                raise RuntimeError(f"Gemini API 認証・通信エラー ({res.status_code}): {res.text}")
-
-        err_text = last_res.text if last_res is not None else "Not Found"
-        raise RuntimeError(f"指定されたモデル名 '{clean_model}' は v1beta / v1 のいずれでも見つかりませんでした (404): {err_text}")
+            raise ValueError("Gemini API Keyがありません。GUIのAPIキーまたはGEMINI_API_KEYを設定してください。")
+        target_model = (model_name or "").strip().removeprefix("models/") or "gemini-2.5-flash"
+        contents = [types.Part.from_text(text=sys_inst)]
+        if audio_path:
+            if not os.path.isfile(audio_path):
+                raise FileNotFoundError(f"Gemini用音声ファイルが見つかりません: {audio_path}")
+            audio_mime = mimetypes.guess_type(audio_path)[0] or "audio/wav"
+            with open(audio_path, "rb") as audio_file:
+                contents.append(types.Part.from_bytes(data=audio_file.read(), mime_type=audio_mime))
+        config_args = {"temperature": temp}
+        if json_schema is not None:
+            config_args["response_mime_type"] = "application/json"
+            config_args["response_json_schema"] = json_schema
+        try:
+            with genai.Client(api_key=active_key, http_options=types.HttpOptions(timeout=600000)) as client:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=[types.Content(role="user", parts=contents)],
+                    config=types.GenerateContentConfig(**config_args),
+                )
+            output = (response.text or "").strip()
+            if not output:
+                raise RuntimeError("Geminiが空の応答を返しました。モデルの対応状況・安全性設定・利用制限を確認してください。")
+            return output
+        except Exception as exc:
+            raise RuntimeError(f"Gemini APIエラー（モデル: {target_model}）: {exc}") from exc
 
     elif provider == "ChatGPT (OpenAI)":
-        active_key = (api_key.strip() if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY", "")).strip()
+        active_key = (api_key or os.getenv("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
         if not active_key:
             raise ValueError("OpenAI API Keyが設定されていません。")
-        client = OpenAI(api_key=active_key, timeout=600.0)
-        response = client.chat.completions.create(
-            model=model_name.strip() if model_name and model_name.strip() else "gpt-4o",
-            messages=[{
-                "role": "system",
-                "content": "You are an expert translator and prompt engineer."
-            }, {"role": "user", "content": sys_inst}],
-            temperature=temp,
-        )
-        return (response.choices[0].message.content or "").strip()
+        target_model = (model_name or "").strip() or "gpt-4o"
+        try:
+            client = OpenAI(api_key=active_key, timeout=600.0, max_retries=2)
+            params = {
+                "model": target_model,
+                "messages": [
+                    {"role": "system", "content": "You are an expert translator and prompt engineer."},
+                    {"role": "user", "content": sys_inst},
+                ],
+            }
+            # Reasoning models can reject non-default temperature.
+            if not re.match(r"^(?:o[1-9](?:-|$)|gpt-[56](?:\\.|-|$))", target_model, re.I):
+                params["temperature"] = temp
+            if json_schema is not None:
+                params["response_format"] = {"type": "json_object"}
+            response = client.chat.completions.create(**params)
+            output = (response.choices[0].message.content or "").strip()
+            if not output:
+                raise RuntimeError("OpenAIが空の応答を返しました。モデルの対応状況を確認してください。")
+            return output
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI APIエラー（モデル: {target_model}）: {exc}") from exc
 
     elif provider == "Ollama (Local)":
         target_model = model_name.strip() if model_name and model_name.strip() else "qwen2.5:7b-instruct-q5_K_M"
@@ -1756,61 +1750,261 @@ async def handle_interactive_base_generate(request):
         return web.json_response({'success': False, 'error': str(e)}, status=400)
 
 
+# Dedicated schema for revision requests; shared video-generation rules.txt is not used here.
+# The user explicitly asks for creative Japanese staging, not a faithful translation.
+_DIRECTOR_REVISE_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'changes': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'shot': {'type': 'integer'},
+                    'field': {'type': 'string', 'enum': ['action']},
+                    'value': {'type': 'string'},
+                },
+                'required': ['shot', 'field', 'value'],
+                'additionalProperties': False,
+            },
+        },
+        'warning': {'type': 'string'},
+    },
+    'required': ['changes', 'warning'],
+    'additionalProperties': False,
+}
+
+
+# Normalize LLM typography before enforcing immutable ComfyUI media references.
+_DIRECTOR_MEDIA_REF_RE = re.compile(r'[<＜]\s*(Subject|Picture|Audio)\s*[:：]?\s*(\d+)\s*[>＞]', re.I)
+_DIRECTOR_MEDIA_REF_UNBRACKETED_RE = re.compile(
+    r'(?<![A-Za-z0-9_<＜])(Subject|Picture|Audio)\s*[:：]?\s*(\d+)(?![A-Za-z0-9_>＞])', re.I
+)
+
+
+def _director_normalize_media_refs(text):
+    """Canonicalize benign variations; never silently renumber any reference."""
+    text = str(text or '')
+    def make_ref(match):
+        label = match.group(1).capitalize()
+        return f'<{label} {int(match.group(2))}>'
+    text = _DIRECTOR_MEDIA_REF_RE.sub(make_ref, text)
+    # Some local models return 'Subject 1' instead of the bracketed reference.
+    text = _DIRECTOR_MEDIA_REF_UNBRACKETED_RE.sub(make_ref, text)
+    return text
+
+
+def _director_media_refs(text):
+    return {f'<{m.group(1).capitalize()} {int(m.group(2))}>'
+            for m in _DIRECTOR_MEDIA_REF_RE.finditer(_director_normalize_media_refs(text))}
+
+
+def _director_restore_revised_refs(value, original, names=None):
+    """Restore safely identifiable aliases, without inventing a new identifier."""
+    value = _director_normalize_media_refs(value)
+    expected = _director_media_refs(original)
+    if not isinstance(names, dict) or not expected:
+        return value
+    # Only aliases for tags already present in the original may be restored.
+    allowed = {str(k): v for k, v in names.items()
+               if str(k) in ('1', '2', '3', '4', '5')
+               and f'<Subject {k}>' in expected
+               and isinstance(v, str) and v.strip() and len(v.strip()) <= 100}
+    if allowed:
+        value = convert_named_subjects(value, allowed)
+    return _director_normalize_media_refs(value)
+
+
+def _director_validate_revised_actions(result, current, target, instruction, names=None):
+    if not isinstance(result, dict) or not isinstance(result.get('changes'), list):
+        raise ValueError('AIの変更案が正しいJSON形式ではありません。')
+    changes = result['changes']
+    if len(changes) > 4:
+        raise ValueError('ショット数の上限を超えました。')
+    valid, seen = [], set()
+    for change in changes:
+        if not isinstance(change, dict):
+            raise ValueError('AIが無効な変更を返しました。')
+        idx, field, value = change.get('shot'), change.get('field'), change.get('value')
+        if type(idx) is not int or idx not in range(1, 5) or field != 'action' or not isinstance(value, str):
+            raise ValueError('AIが許可されていない修正項目を返しました。')
+        if target != 'auto' and idx != target:
+            raise ValueError('指定ショット以外の変更が含まれています。')
+        if not current[idx - 1].get('enabled'):
+            raise ValueError('無効なショットへの修正はできません。')
+        if idx in seen:
+            raise ValueError('同一ショットへの重複修正があります。')
+        seen.add(idx)
+        original = str(current[idx - 1].get('action', '') or '').strip()
+        value = _director_restore_revised_refs(value.strip(), original, names)
+        if not value or len(value) > 4000 or not re.sub(_DIRECTOR_MEDIA_REF_RE, '', value).strip():
+            raise ValueError('AIの修正文章が空または長すぎます。')
+        if value == _director_normalize_media_refs(original):
+            continue
+        # References are stable identifiers. Comparing canonical values prevents
+        # false alarms from case/spacing variants, while rejecting changed IDs.
+        original_tags = _director_media_refs(original)
+        new_tags = _director_media_refs(value)
+        missing, added = original_tags - new_tags, new_tags - original_tags
+        if missing or added:
+            reasons = []
+            if missing:
+                reasons.append('不足: ' + ', '.join(sorted(missing)))
+            if added:
+                reasons.append('追加: ' + ', '.join(sorted(added)))
+            raise ValueError('Subject/Picture/Audioの参照タグが変更されています（' + ' / '.join(reasons) + '）。')
+        if re.search(r'(?m)^\s*(?:ショットサイズ|アングル|カメラワーク|動作)\s*[:：]', value):
+            raise ValueError('撮影文章ではなく項目リストが返されました。')
+        # A no-cut request must not silently turn into an edit between angles.
+        if re.search(r'シームレス|ワンカット|ノーカット|カット(?:せず|なし|を挟まず|しない)|途切れず|連続撮影', instruction):
+            if re.search(r'カットを(?:挟んで|入れて)(?!いない|いません)|ジャンプカット|編集で切り替え', value):
+                raise ValueError('カットを挟まないという修正指示に反しています。')
+            # Do not reject a valid camera move just because the model used
+            # different wording (e.g. 「背後から正面へ回り込む」).
+            # The user's semantic request belongs in the generation prompt,
+            # not in a brittle keyword whitelist.
+        # Requests to ADD creativity must actually expand the cinematic direction.
+        wants_expansion = re.search(r'もっと|加え|追加|豊か|具体|迫力|スタイリッシュ|かっこよ|ダイナミック|映画的|躍動|演出を|モーション|動きのある', instruction)
+        cinematic = re.search(r'カメラ|ショット|クローズアップ|アップ|アングル|俯瞰|煽り|追従|旋回|パン|ドリー|ズーム|寄り|引き|捉え|映し|映す|フレーミング', value)
+        if wants_expansion and (len(value) < len(original) + 15 or not cinematic):
+            raise ValueError('演出の具体的な追加が足りません。')
+        valid.append({'shot': idx, 'field': 'action', 'value': value})
+    if not valid:
+        raise ValueError('元の文章から実質的な変更がありませんでした。')
+    return valid
+
+
 @PromptServer.instance.routes.post('/h3/interactive_base_revise')
 async def handle_interactive_base_revise(request):
     try:
         data = await request.json()
         current = data.get('shots', [])
-        if not isinstance(current, list) or len(current) != 4:
+        if not isinstance(current, list) or len(current) != 4 or not all(isinstance(s, dict) for s in current):
             raise ValueError('現在のショットが取得できません。')
-        instruction = str(data.get('instruction', '')).strip()
+        instruction = str(data.get('instruction', '') or '').strip()
         if not instruction:
             raise ValueError('修正指示を入力してください。')
         target = data.get('target', 'auto')
         if target != 'auto':
-            target = int(target)
+            try:
+                target = int(target)
+            except (TypeError, ValueError):
+                raise ValueError('修正先ショットが不正です。')
             if target not in range(1, 5):
                 raise ValueError('修正先ショットが不正です。')
-        prompt = (
-            'あなたは映像タイムラインの精密な部分修正エディタです。日本語JSONだけを出力。'
-            '修正指示に必要なショット・フィールドだけを変更してください。'
-            '関係のないショット、人物、背景、出来事、時間、台詞、構図、演出は絶対に変えません。'
-            '対象を特定できなければchangesを空配列とし、warningに理由を書いてください。'
-            'フィールドはaction, dialogue, speakerのいずれかのみ。'
-            'actionの変更時は、指定箇所以外の文章を原文のまま保持してください。'
-            'dialogueでは台詞の本文だけ、speakerはS1〜S5またはNoneを返してください。'
-            'timeやenabledは変更禁止。変更するショット番号は1〜4。'
-            '返答形式: {"changes":[{"shot":1,"field":"action","value":"変更後の文章"}],"warning":""}。'
-            f'修正対象: {target}（autoなら指示から判定）。\n'
-            '入力:' + json.dumps({'shots': current, 'instruction': instruction,
-                                  'names': data.get('names', {})}, ensure_ascii=False)
+            if not current[target-1].get('enabled'):
+                raise ValueError(f'ショット{target}が無効になっています。')
+        if not any(s.get('enabled') and str(s.get('action', '') or '').strip() for s in current):
+            raise ValueError('修正元のショット文章がありません。タイムラインへ入力してください。')
+        if target != 'auto' and not str(current[target-1].get('action', '') or '').strip():
+            raise ValueError('選択したショットの本文が空です。')
+
+        names = data.get('names', {})
+        if not isinstance(names, dict):
+            names = {}
+        payload_context = {
+            'shots': [{
+                'shot': i+1, 'enabled': bool(s.get('enabled')),
+                'time': str(s.get('time', '')),
+                'action': str(s.get('action', '')),
+                'dialogue': str(s.get('dialogue', '')),
+                'speaker': str(s.get('speaker', 'None')),
+            } for i, s in enumerate(current)],
+            'instruction': instruction,
+            'target': target,
+            'registered_names': names,
+            'synopsis': str(data.get('overall_story', '') or ''),
+        }
+        continuity_requested = bool(re.search(r'シームレス|ワンカット|ノーカット|カット(?:せず|なし|を挟まず|しない)|途切れず|連続撮影', instruction))
+        continuity_rule = (
+            '\n【今回の最優先演出指示】ユーザーはカットなしの連続撮影を要求しています。'
+            'ショット途中で編集カット・場面転換・ジャンプカット・別アングルへの瞬間切替を入れない。'
+            '指定された始点から終点まで、カメラの位置や向きを連続的かつ滑らかに移動させる。'
+            '「ワンカット」「カットを挟まず」など連続性が明確な撮影文章にする。'
+            if continuity_requested else ''
         )
-        result = _director_json(await asyncio.to_thread(_director_llm_input, data, prompt, 0.1))
-        changes = result.get('changes', [])
-        if not isinstance(changes, list):
-            raise ValueError('修正データの形式が不正です。')
-        valid = []
-        seen = set()
-        for change in changes:
-            if not isinstance(change, dict):
-                raise ValueError('修正データの形式が不正です。')
-            idx = change.get('shot')
-            field = change.get('field')
-            val = change.get('value')
-            if type(idx) is not int or idx not in range(1, 5) or field not in ('action', 'dialogue', 'speaker') or not isinstance(val, str):
-                raise ValueError('許可されていない修正項目が返されました。')
-            if target != 'auto' and idx != target:
-                raise ValueError('指定ショット以外の変更が含まれています。')
-            if not current[idx - 1].get('enabled'):
-                raise ValueError('無効なショットへの修正はできません。')
-            if field == 'speaker' and not re.fullmatch(r'S[1-5]|None', val):
-                raise ValueError('話者の値が不正です。')
-            if (idx, field) in seen:
-                raise ValueError('同一フィールドへの重複修正があります。')
-            seen.add((idx, field))
-            if val != str(current[idx - 1].get(field, '')):
-                valid.append({'shot': idx, 'field': field, 'value': val})
-        return web.json_response({'success': True, 'changes': valid, 'warning': str(result.get('warning', ''))})
+        prompt = (
+            'あなたはプロのアニメ映像監督です。これは翻訳でも校正でもなく、日本語ショット割りの【創造的な演出改稿】です。'
+            'ユーザーの要望を満たす具体的なカメラワーク、構図、被写体の見せ方、動作の流れを考案してください。\n'
+            '【最優先】元の「何が起こるか／誰が何をするか」を残し、演出手法を積極的に追加・再構成してください。'
+            '「もっとスタイリッシュに」等の抽象的な要望は、必ず映像として撮れる具体的なカメラ・アングル・構図・時間順の演出にしてください。'
+            '元の文章をそのままコピー、単に「スタイリッシュに」「迫力満点で」等の形容詞を付け足すだけの回答は禁止。\n'
+            '【重要】ショット1枠の中で、複数の画角・カメラの切替を「まず」「続いて」「最後に」等で表現して構いません。'
+            'ただしショット数は増やさず、各ショットの持ち時間で無理なく実行できる演出にしてください。\n' +
+            continuity_rule +
+            '【保護】登場人物、場所、確定した出来事、道具の種類と使い方、台詞、話者は変更しません。'
+            '新しい事件・新キャラ・新しい台詞を創作しないこと。'
+            '<Subject 1>等の既存タグを全て原文と同じ綴りで保持し、存在しないタグを創作しないこと。'
+            '固有名詞はregistered_namesに従って保持。'
+            '修正はactionのみ。time、enabled、dialogue、speakerには一切触れないこと。\n'
+            '【対象】targetが番号ならそのショットだけ。autoなら指示中に明示されたショットを優先。'
+            '番号がなく有効ショットが1つならそれだけを修正。複数あり全体への演出要望なら、有効なショットを対象にできる。'
+            '無関係なショットは変更しない。\n'
+            '【出力】変更後のactionは日本語の自然な撮影文章1〜5文程度。'
+            '変更した各ショットについて、修正後のaction全文を返す（差分だけは不可）。'
+            'JSONのみ出力。形式は'
+            '{"changes":[{"shot":1,"field":"action","value":"修正後の日本語撮影文章"}],"warning":""}。\n'
+            '【品質の例】原文「ニコが森を走っている」。要望「もっとスタイリッシュなアングルやモーションを加えたい」。'
+            '良い修正例「ミディアムショットで森を駆けるニコを斜め前方から捉える。'
+            '続いてカメラが速度を合わせて並走しながらニコの顔へ急接近し、疾走感を強調する。'
+            '最後にカメラを引き、ニコが木々の間を走り去る背中をロングショットで映す。」\n'
+            '入力JSON：' + json.dumps(payload_context, ensure_ascii=False)
+        )
+        error_msg = ''
+        schema = _DIRECTOR_REVISE_SCHEMA if data.get('llm_provider', 'Ollama (Local)') == 'Ollama (Local)' else None
+        try:
+            for attempt in range(2):
+                result = None
+                retry_prompt = prompt
+                if attempt:
+                    retry_prompt += (
+                        '\n【再考必須】前回の修正案は不十分でした：' + error_msg +
+                        '。元の文章を繰り返さず、ユーザーの修正指示を満たす具体的なカメラ移動・構図を示し、'
+                        '指定したショットのaction全文を日本語で作り直してください。'
+                        '元の<Subject X>/<Picture X>/<Audio X>を漏らさず同じ番号で保持。JSONのみ返してください。'
+                    )
+                raw = await asyncio.to_thread(_director_llm_input, data, retry_prompt, 0.45 if not attempt else 0.4, schema)
+                try:
+                    result = _director_json(raw)
+                    valid = _director_validate_revised_actions(result, current, target, instruction, names)
+                    return web.json_response({
+                        'success': True, 'changes': valid,
+                        'warning': str(result.get('warning', '') or ''),
+                    })
+                except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                    error_msg = str(exc)
+                    # Preserve useful cinematic changes when the only failure is
+                    # missing/renamed reference tags: ask for a tag-only repair.
+                    if attempt == 0 and error_msg.startswith('Subject/Picture/Audioの参照タグ') and isinstance(result, dict):
+                        expected_per_shot = {
+                            str(i + 1): sorted(_director_media_refs(s.get('action', '')))
+                            for i, s in enumerate(current) if s.get('enabled')
+                        }
+                        fix_prompt = (
+                            '日本語の撮影文にある参照タグだけを修復してください。JSONオブジェクトのみ返してください。'
+                            '候補の演出、カメラワーク、道具、動作、時系列、ショット番号は変更しないこと。'
+                            '原文に存在する<Subject X>、<Picture X>、<Audio X>は同じショット内に必ず残し、'
+                            '原文にない参照タグは作らないこと。名前への言い換えは元のタグへ戻すこと。'
+                            '出力形式は{"changes":[{"shot":1,"field":"action","value":"..."}],"warning":""}。'
+                            '\n元のショットとタグ: ' + json.dumps(payload_context['shots'], ensure_ascii=False) +
+                            '\nショット別の必要タグ: ' + json.dumps(expected_per_shot, ensure_ascii=False) +
+                            '\n修復すべき候補: ' + json.dumps(result, ensure_ascii=False)
+                        )
+                        try:
+                            repaired_raw = await asyncio.to_thread(_director_llm_input, data, fix_prompt, 0.15, schema)
+                            repaired = _director_json(repaired_raw)
+                            valid = _director_validate_revised_actions(repaired, current, target, instruction, names)
+                            return web.json_response({
+                                'success': True, 'changes': valid,
+                                'warning': str(repaired.get('warning', '') or ''),
+                            })
+                        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as fix_exc:
+                            error_msg = str(fix_exc)
+            raise ValueError('演出の改稿が成立しませんでした（' + error_msg + '）。対象ショットを明示するか、別の指示でお試しください。')
+        finally:
+            if data.get('llm_provider', 'Ollama (Local)') == 'Ollama (Local)':
+                model = str(data.get('llm_model', '') or '').strip() or 'qwen2.5:7b-instruct-q5_K_M'
+                await asyncio.to_thread(unload_ollama_vram, model)
     except Exception as e:
         return web.json_response({'success': False, 'error': str(e)}, status=400)
 

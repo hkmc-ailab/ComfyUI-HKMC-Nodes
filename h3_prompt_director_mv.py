@@ -55,96 +55,65 @@ def unload_ollama_vram(model_name):
 
 def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None):
     if provider == "Gemini (Cloud)":
-        raw_key = api_key if (api_key and api_key.strip()) else (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
-        active_key = raw_key.strip().strip('"').strip("'").strip()
-
-        if active_key:
-            masked = active_key[:4] + "..." + active_key[-4:] if len(active_key) > 8 else "***"
-            source = "UI直接入力" if (api_key and api_key.strip()) else "環境変数"
-            print(f"[H3 Prompt Director MV] Gemini APIキー使用中 ({source}): {masked} (文字数: {len(active_key)})")
-        else:
-            raise ValueError("Gemini API Key is missing. Please set it in the UI or as an environment variable (GEMINI_API_KEY or GOOGLE_API_KEY).")
-
-        target_model = model_name.strip() if model_name and model_name.strip() else "gemini-3.8-flash"
-        
-        parts = [{"text": sys_inst}]
-        raw_audio_bytes = None
-        audio_mime = "audio/wav"
-        if audio_path and os.path.exists(audio_path):
-            try:
-                guessed_mime, _ = mimetypes.guess_type(audio_path)
-                audio_mime = guessed_mime or "audio/wav"
-                with open(audio_path, "rb") as f:
-                    raw_audio_bytes = f.read()
-                b64_audio = base64.b64encode(raw_audio_bytes).decode("utf-8")
-                parts.append({
-                    "inline_data": {
-                        "mime_type": audio_mime,
-                        "data": b64_audio
-                    }
-                })
-            except Exception as e:
-                print(f"[H3 Prompt Director MV] 音声読み込みエラー: {e}")
-
-        payload = {
-            "contents": [{"parts": parts}],
-            "generationConfig": {"temperature": temp}
-        }
-        url_base = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-
-        headers_bearer = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {active_key}"
-        }
-        res1 = requests.post(url_base, headers=headers_bearer, json=payload, timeout=600)
-        if res1.status_code == 200:
-            try:
-                return res1.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
-                pass
-
-        headers_apikey = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": active_key
-        }
-        res2 = requests.post(url_base, headers=headers_apikey, json=payload, timeout=600)
-        if res2.status_code == 200:
-            try:
-                return res2.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
-                pass
-
         try:
-            import google.generativeai as legacy_genai
-            legacy_genai.configure(api_key=active_key, transport="rest")
-            g_model = legacy_genai.GenerativeModel(model_name=target_model, generation_config={"temperature": temp})
-            contents_sdk = [sys_inst]
-            if raw_audio_bytes:
-                contents_sdk.append({"mime_type": audio_mime, "data": raw_audio_bytes})
-            sdk_res = g_model.generate_content(contents_sdk)
-            if getattr(sdk_res, "text", None):
-                return sdk_res.text.strip()
-        except Exception:
-            pass
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise RuntimeError("Geminiを利用するにはComfyUIのPython環境へ google-genai をインストールしてください: python -m pip install -U google-genai") from exc
 
-        err_detail = res1.text if res1.text else res2.text
-        raise RuntimeError(f"Gemini API 認証エラー: {err_detail}")
+        active_key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+        if not active_key:
+            raise ValueError("Gemini API Keyがありません。GUIのAPIキーまたはGEMINI_API_KEYを設定してください。")
+        target_model = (model_name or "").strip().removeprefix("models/") or "gemini-3.8-flash"
+        parts = [types.Part.from_text(text=sys_inst)]
+        if audio_path:
+            if not os.path.isfile(audio_path):
+                raise FileNotFoundError(f"Gemini用音声ファイルが見つかりません: {audio_path}")
+            audio_mime = mimetypes.guess_type(audio_path)[0] or "audio/wav"
+            with open(audio_path, "rb") as audio_file:
+                parts.append(types.Part.from_bytes(data=audio_file.read(), mime_type=audio_mime))
+        try:
+            with genai.Client(api_key=active_key, http_options=types.HttpOptions(timeout=600000)) as client:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=[types.Content(role="user", parts=parts)],
+                    config=types.GenerateContentConfig(temperature=temp),
+                )
+            output = (response.text or "").strip()
+            if not output:
+                raise RuntimeError("Geminiが空の応答を返しました。モデルや利用制限を確認してください。")
+            return output
+        except Exception as exc:
+            raise RuntimeError(f"Gemini APIエラー（モデル: {target_model}）: {exc}") from exc
 
     elif provider == "ChatGPT (OpenAI)":
-        from openai import OpenAI
-        active_key = (api_key.strip() if api_key and api_key.strip() else os.getenv("OPENAI_API_KEY", "")).strip()
-        if not active_key: raise ValueError("OpenAI API Key is missing.")
-        client = OpenAI(api_key=active_key, timeout=600.0)
-        res = client.chat.completions.create(
-            model=model_name.strip() if model_name and model_name.strip() else "gpt-4o",
-            messages=[
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError("OpenAIを利用するにはComfyUIのPython環境へ openai をインストールしてください。") from exc
+        active_key = (api_key or os.getenv("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
+        if not active_key:
+            raise ValueError("OpenAI API Keyが設定されていません。")
+        target_model = (model_name or "").strip() or "gpt-4o"
+        params = {
+            "model": target_model,
+            "messages": [
                 {"role": "system", "content": "You are an expert music video director, cinematic DP, and storyboard artist."},
                 {"role": "user", "content": sys_inst},
             ],
-            temperature=temp,
-        )
-        return (res.choices[0].message.content or "").strip()
-        
+        }
+        if not re.match(r"^(?:o[1-9](?:-|$)|gpt-[56](?:\.|-|$))", target_model, re.I):
+            params["temperature"] = temp
+        try:
+            client = OpenAI(api_key=active_key, timeout=600.0, max_retries=2)
+            response = client.chat.completions.create(**params)
+            output = (response.choices[0].message.content or "").strip()
+            if not output:
+                raise RuntimeError("OpenAIが空の応答を返しました。")
+            return output
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI APIエラー（モデル: {target_model}）: {exc}") from exc
+
     elif provider == "Ollama (Local)":
         target_model = model_name.strip() if model_name and model_name.strip() else "qwen2.5:7b-instruct-q5_K_M"
         payload = {
