@@ -147,7 +147,12 @@ function h3ResetSelectedWidgets(wMap, freshValues, selected) {
             resetKey("cache_settings");
             for (let i = 1; i <= 10; i++) resetKey(`c${i}_locked`);
         }
-        if (selected.prompt) resetKey("base_locked");
+        if (selected.prompt) {
+            resetKey("base_locked");
+            resetKey("mode_prompt_cache");
+            resetKey("mode_clip_prompt_cache");
+            resetKey("mode_use_custom_cache");
+        }
         wMap.clips_data_json.value = JSON.stringify(data);
         if (wMap.clips_data_json.callback) wMap.clips_data_json.callback(wMap.clips_data_json.value);
     }
@@ -279,6 +284,30 @@ function installStudioStyles() {
         .h3-studio-container.h3-has-background .h3-media-body {
             background: transparent;
         }
+        .h3-mode-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: #101216;
+            border-bottom: 1px solid #30353d;
+            padding: 5px 10px;
+            min-height: 30px;
+            box-sizing: border-box;
+            flex-shrink: 0;
+            flex-wrap: wrap;
+        }
+        .h3-mode-option {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            color: #929aa7;
+            font-size: 10px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .h3-mode-option.selected { color: #fff; }
+        .h3-mode-option input { margin: 0; width: 12px; height: 12px; accent-color: #007acc; cursor: pointer; }
         .h3-tab-bar {
             display: flex;
             background: #000000;
@@ -406,7 +435,6 @@ function installStudioStyles() {
             box-sizing: border-box;
             background: #000000;
         }
-        /* Collapsible widgets: applies to Timeline, Scene and Clip only. */
         .h3-collapse-header {
             display: flex;
             align-items: center;
@@ -1128,6 +1156,8 @@ app.registerExtension({
                     Array.isArray(autoState.uiCollapsed)) autoState.uiCollapsed = {};
 
                 const makeCollapsible = (card, key, heading = null) => {
+                    if (!autoState.uiCollapsed || typeof autoState.uiCollapsed !== "object" ||
+                        Array.isArray(autoState.uiCollapsed)) autoState.uiCollapsed = {};
                     const header = document.createElement("div");
                     header.className = "h3-collapse-header";
                     let title = heading;
@@ -1212,6 +1242,70 @@ app.registerExtension({
 
                 const GUI_Y_OFFSET = -14;
                 root.style.transform = `translateY(${GUI_Y_OFFSET}px)`;
+
+                const getGenerationMode = () => {
+                    const value = String(wMap.generation_mode?.value || "REF2VA/HYBRID");
+                    return ["REF2VA/HYBRID", "FL2VA", "I2VA", "T2VA"].includes(value) ? value : "REF2VA/HYBRID";
+                };
+                const isReferenceMode = () => getGenerationMode() === "REF2VA/HYBRID";
+                const modeBar = document.createElement("div");
+                modeBar.className = "h3-mode-bar";
+                const modeOptions = new Map();
+                for (const mode of ["REF2VA/HYBRID", "FL2VA", "I2VA", "T2VA"]) {
+                    const option = document.createElement("label");
+                    option.className = "h3-mode-option";
+                    const radio = document.createElement("input");
+                    radio.type = "radio";
+                    radio.name = `h3-generation-mode-${node.id}`;
+                    radio.value = mode;
+                    const name = document.createElement("span");
+                    name.textContent = mode;
+                    option.append(radio, name);
+                    radio.onchange = () => {
+                        if (!radio.checked) return;
+                        const previousMode = getGenerationMode();
+                        const previousText = String(wMap.custom_prompt?.value || "");
+                        const cache = {...getV("mode_prompt_cache", {})};
+                        const clipCache = {...getV("mode_clip_prompt_cache", {})};
+                        const useCache = {...getV("mode_use_custom_cache", {})};
+                        cache[previousMode] = previousText;
+                        clipCache[previousMode] = String(wMap.generated_clip_prompts?.value || "{}");
+                        useCache[previousMode] = !!wMap.use_custom_prompt?.value;
+                        setV("mode_prompt_cache", cache);
+                        setV("mode_clip_prompt_cache", clipCache);
+                        setV("mode_use_custom_cache", useCache);
+                        if (wMap.generation_mode) {
+                            wMap.generation_mode.value = mode;
+                            wMap.generation_mode.callback?.(mode);
+                        }
+                        if (wMap.custom_prompt) {
+                            wMap.custom_prompt.value = String(cache[mode] || "");
+                            wMap.custom_prompt.callback?.(wMap.custom_prompt.value);
+                        }
+                        if (wMap.generated_clip_prompts) {
+                            wMap.generated_clip_prompts.value = String(clipCache[mode] || "{}");
+                            wMap.generated_clip_prompts.callback?.(wMap.generated_clip_prompts.value);
+                        }
+                        if (wMap.use_custom_prompt) {
+                            wMap.use_custom_prompt.value = !!useCache[mode];
+                            wMap.use_custom_prompt.callback?.(wMap.use_custom_prompt.value);
+                        }
+                        promptCheckState = null;
+                        syncGenerationMode();
+                        renderTabContent();
+                        renderFixedMediaLanes();
+                    };
+                    modeOptions.set(mode, {radio, option});
+                    modeBar.appendChild(option);
+                }
+                const syncGenerationMode = () => {
+                    const current = getGenerationMode();
+                    for (const [mode, {radio, option}] of modeOptions) {
+                        radio.checked = mode === current;
+                        option.classList.toggle("selected", mode === current);
+                    }
+                };
+                syncGenerationMode();
 
                 const tabBar = document.createElement("div");
                 tabBar.className = "h3-tab-bar";
@@ -1336,7 +1430,7 @@ app.registerExtension({
                 };
 
                 fixedMediaArea.append(mediaResizerBar, mediaBody);
-                root.append(tabBar, contentArea, fixedMediaArea);
+                root.append(modeBar, tabBar, contentArea, fixedMediaArea);
 
                 const convertSubjectNamesInTextarea = async (ta) => {
                     if (!ta || ta.isComposing) return;
@@ -2109,7 +2203,7 @@ app.registerExtension({
                                     if (refmodSelects[i]) {
                                         refmodSelects[i].value = "None";
                                     }
-                                    syncRefModRemote(i, "None");
+                                    if (isReferenceMode()) syncRefModRemote(i, "None");
                                 }
 
                                 if (charCards[i]) {
@@ -2138,14 +2232,16 @@ app.registerExtension({
                             if (refmodSelect) {
                                 refmodSelects[i] = refmodSelect;
                                 refmodSelect.addEventListener("change", (e) => {
-                                    syncRefModRemote(i, e.target.value);
+                                    if (isReferenceMode()) syncRefModRemote(i, e.target.value);
                                 });
                             }
                             const picRow = createPicCheckboxGroup(i);
                             const voiceRow = bindInput(`char${i}_audio`, "ボイスリファレンス");
                             const extraRow = bindInput(`char${i}_extra`, "特徴定義・追記", true, "キャラクターの特徴や追加の特徴を入力");
 
-                            card.append(title, nameRow, presetRow, refmodRow, picRow, voiceRow, extraRow);
+                            card.append(title, nameRow, presetRow);
+                            if (isReferenceMode()) card.append(refmodRow, picRow, voiceRow);
+                            card.append(extraRow);
                             contentArea.appendChild(card);
                             charCards[i] = card;
                         }
@@ -2215,110 +2311,119 @@ app.registerExtension({
                         }
 
                     } else if (activeTab === "scene") {
-                        const subjectBox = document.createElement("div");
-                        subjectBox.className = "h3-char-card";
-                        const subjectTitle = document.createElement("div");
-                        subjectTitle.className = "h3-char-title";
-                        subjectTitle.textContent = "主題定義（subject_definitions）";
-                        subjectBox.appendChild(subjectTitle);
-                        for (let i = 1; i <= 5; i++) {
-                            const locked = !!charEnabledState[i];
-                            const row = document.createElement("div");
-                            row.className = "h3-field-row";
-                            const header = document.createElement("div");
-                            header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;";
-                            const label = document.createElement("label");
-                            label.textContent = `S${i} ${locked ? "🔒 キャラクター設定で使用中" : "自由入力（空欄なら定義なし）"}`;
-                            header.appendChild(label);
-                            const kindWidget = wMap[`subject_kind_${i}`];
-                            const kindSelect = document.createElement("select");
-                            kindSelect.title = "Subjectの種類";
-                            kindSelect.style.cssText = "font-size:11px;padding:2px 4px;border-radius:4px;background:#252525;color:#eee;border:1px solid #555;";
-                            for (const kind of ["人物", "背景", "オブジェクト"]) {
-                                const opt = document.createElement("option");
-                                opt.value = kind; opt.textContent = kind;
-                                kindSelect.appendChild(opt);
-                            }
-                            kindSelect.value = locked ? "人物" : (kindWidget?.value || "オブジェクト");
-                            kindSelect.disabled = locked;
-                            kindSelect.onchange = () => {
-                                if (kindWidget) { kindWidget.value = kindSelect.value; if (kindWidget.callback) kindWidget.callback(kindWidget.value); }
-                            };
-                            header.appendChild(kindSelect);
-                            if (!locked) {
-                                const mediaButtons = document.createElement("div");
-                                mediaButtons.style.cssText = "display:flex;align-items:center;gap:2px;flex-wrap:wrap;justify-content:flex-end;";
-                                const makeButtons = (kind, count, prefix, tagName, activeColor) => {
-                                    const widget = wMap[`subject_${kind}_${i}`];
-                                    const selected = new Set((String(widget?.value || "").match(new RegExp(`<${tagName}\\s+\\d+>`, "gi")) || []).map(s => s.toLowerCase()));
-                                    for (let n = 1; n <= count; n++) {
-                                        const tag = `<${tagName} ${n}>`;
-                                        const btn = document.createElement("button");
-                                        btn.type = "button";
-                                        btn.textContent = `${prefix}${n}`;
-                                        btn.title = tag;
-                                        btn.style.cssText = "font-size:9px;padding:2px 4px;border-radius:4px;cursor:pointer;min-width:23px;line-height:1.4;";
-                                        const refresh = () => {
-                                            const on = selected.has(tag.toLowerCase());
-                                            btn.style.background = on ? activeColor : "#242424";
-                                            btn.style.color = on ? "#fff" : "#aab0b9";
-                                            btn.style.border = on ? "1px solid #8bb4dc" : "1px solid #444";
-                                        };
-                                        refresh();
-                                        btn.onclick = (e) => {
-                                            e.stopPropagation();
-                                            if (!widget) return;
-                                            const key = tag.toLowerCase();
-                                            if (selected.has(key)) selected.delete(key); else selected.add(key);
-                                            widget.value = Array.from(selected).map(t => {
-                                                const m = t.match(/(\d+)/);
-                                                return `<${tagName} ${m[1]}>`;
-                                            }).sort((a,b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).join(", ");
-                                            if (widget.callback) widget.callback(widget.value);
+                        if (isReferenceMode()) {
+                            const subjectBox = document.createElement("div");
+                            subjectBox.className = "h3-char-card";
+                            const subjectTitle = document.createElement("div");
+                            subjectTitle.className = "h3-char-title";
+                            subjectTitle.textContent = "主題定義（subject_definitions）";
+                            subjectBox.appendChild(subjectTitle);
+                            for (let i = 1; i <= 5; i++) {
+                                const locked = !!charEnabledState[i];
+                                const row = document.createElement("div");
+                                row.className = "h3-field-row";
+                                const header = document.createElement("div");
+                                header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;";
+                                const label = document.createElement("label");
+                                label.textContent = `S${i} ${locked ? "🔒 キャラクター設定で使用中" : "自由入力（空欄なら定義なし）"}`;
+                                header.appendChild(label);
+                                const kindWidget = wMap[`subject_kind_${i}`];
+                                const kindSelect = document.createElement("select");
+                                kindSelect.title = "Subjectの種類";
+                                kindSelect.style.cssText = "font-size:11px;padding:2px 4px;border-radius:4px;background:#252525;color:#eee;border:1px solid #555;";
+                                for (const kind of ["人物", "背景", "オブジェクト"]) {
+                                    const opt = document.createElement("option");
+                                    opt.value = kind; opt.textContent = kind;
+                                    kindSelect.appendChild(opt);
+                                }
+                                kindSelect.value = locked ? "人物" : (kindWidget?.value || "オブジェクト");
+                                kindSelect.disabled = locked;
+                                kindSelect.onchange = () => {
+                                    if (kindWidget) { kindWidget.value = kindSelect.value; if (kindWidget.callback) kindWidget.callback(kindWidget.value); }
+                                };
+                                header.appendChild(kindSelect);
+                                if (!locked) {
+                                    const mediaButtons = document.createElement("div");
+                                    mediaButtons.style.cssText = "display:flex;align-items:center;gap:2px;flex-wrap:wrap;justify-content:flex-end;";
+                                    const makeButtons = (kind, count, prefix, tagName, activeColor) => {
+                                        const widget = wMap[`subject_${kind}_${i}`];
+                                        const selected = new Set((String(widget?.value || "").match(new RegExp(`<${tagName}\\s+\\d+>`, "gi")) || []).map(s => s.toLowerCase()));
+                                        for (let n = 1; n <= count; n++) {
+                                            const tag = `<${tagName} ${n}>`;
+                                            const btn = document.createElement("button");
+                                            btn.type = "button";
+                                            btn.textContent = `${prefix}${n}`;
+                                            btn.title = tag;
+                                            btn.style.cssText = "font-size:9px;padding:2px 4px;border-radius:4px;cursor:pointer;min-width:23px;line-height:1.4;";
+                                            const refresh = () => {
+                                                const on = selected.has(tag.toLowerCase());
+                                                btn.style.background = on ? activeColor : "#242424";
+                                                btn.style.color = on ? "#fff" : "#aab0b9";
+                                                btn.style.border = on ? "1px solid #8bb4dc" : "1px solid #444";
+                                            };
                                             refresh();
-                                        };
-                                        mediaButtons.appendChild(btn);
-                                    }
-                                };
-                                makeButtons("pics", 9, "P", "Picture", "#1769aa");
-                                const separator = document.createElement("span");
-                                separator.textContent = "│";
-                                separator.style.color = "#666";
-                                mediaButtons.appendChild(separator);
-                                makeButtons("audio", 3, "A", "Audio", "#176c4b");
-                                header.appendChild(mediaButtons);
+                                            btn.onclick = (e) => {
+                                                e.stopPropagation();
+                                                if (!widget) return;
+                                                const key = tag.toLowerCase();
+                                                if (selected.has(key)) selected.delete(key); else selected.add(key);
+                                                widget.value = Array.from(selected).map(t => {
+                                                    const m = t.match(/(\d+)/);
+                                                    return `<${tagName} ${m[1]}>`;
+                                                }).sort((a,b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).join(", ");
+                                                if (widget.callback) widget.callback(widget.value);
+                                                refresh();
+                                            };
+                                            mediaButtons.appendChild(btn);
+                                        }
+                                    };
+                                    makeButtons("pics", 9, "P", "Picture", "#1769aa");
+                                    const separator = document.createElement("span");
+                                    separator.textContent = "│";
+                                    separator.style.color = "#666";
+                                    mediaButtons.appendChild(separator);
+                                    makeButtons("audio", 3, "A", "Audio", "#176c4b");
+                                    header.appendChild(mediaButtons);
+                                }
+                                const input = document.createElement("textarea");
+                                input.rows = 1;
+                                input.className = "h3-prompt-textarea";
+                                input.style.height = "34px";
+                                input.style.minHeight = "34px";
+                                input.style.resize = "none";
+                                input.style.overflowY = "hidden";
+                                input.disabled = locked;
+                                if (locked) {
+                                    const name = wMap[`char${i}_name`]?.value?.trim() || `キャラ${i}`;
+                                    input.value = `S${i}は${name}で定義されています。`;
+                                    input.style.opacity = "0.55";
+                                } else {
+                                    input.value = wMap[`subject_def_${i}`]?.value || "";
+                                    input.placeholder = "例：木々に囲まれた古い木造小屋";
+                                    input.oninput = () => {
+                                        const w = wMap[`subject_def_${i}`];
+                                        if (w) { w.value = input.value; if (w.callback) w.callback(w.value); }
+                                    };
+                                }
+                                row.append(header, input);
+                                subjectBox.appendChild(row);
                             }
-                            const input = document.createElement("textarea");
-                            input.rows = 1;
-                            input.className = "h3-prompt-textarea";
-                            input.style.height = "34px";
-                            input.style.minHeight = "34px";
-                            input.style.resize = "none";
-                            input.style.overflowY = "hidden";
-                            input.disabled = locked;
-                            if (locked) {
-                                const name = wMap[`char${i}_name`]?.value?.trim() || `キャラ${i}`;
-                                input.value = `S${i}は${name}で定義されています。`;
-                                input.style.opacity = "0.55";
-                            } else {
-                                input.value = wMap[`subject_def_${i}`]?.value || "";
-                                input.placeholder = "例：木々に囲まれた古い木造小屋";
-                                input.oninput = () => {
-                                    const w = wMap[`subject_def_${i}`];
-                                    if (w) { w.value = input.value; if (w.callback) w.callback(w.value); }
-                                };
-                            }
-                            row.append(header, input);
-                            subjectBox.appendChild(row);
+                            makeCollapsible(subjectBox, "scene-subject-definitions");
+                            const retentionCard = createRetentionSettings();
+                            makeCollapsible(retentionCard, "scene-retention-settings");
+                            contentArea.append(
+                                subjectBox,
+                                sceneFieldCard("overall_story", "全体のあらすじ（summary）", true, "場所・時間帯・登場人物・出来事・物語の流れを日本語で入力（LLMが英訳）"),
+                                sceneFieldCard("quality_control", "禁止事項＆スタイル維持（retention_analysis）", true, "崩れ防止、画風維持、3D化禁止などのネガティブ・クオリティ指示を入力"),
+                                retentionCard
+                            );
+                        } else {
+                            const note = document.createElement("div");
+                            note.className = "h3-guided-intro";
+                            note.textContent = "T2VA・I2VA・FL2VAは3セクション形式。映像内容は［キャラクター設定］と［タイムライン］で指定してください。禁止事項や画風の指示は各ショットのアクション欄へ。［おまかせ］のショット構成機能も利用できます。";
+                            contentArea.appendChild(note);
                         }
-                        makeCollapsible(subjectBox, "scene-subject-definitions");
-                        const retentionCard = createRetentionSettings();
-                        makeCollapsible(retentionCard, "scene-retention-settings");
                         contentArea.append(
-                            subjectBox,
-                            sceneFieldCard("overall_story", "全体のあらすじ（summary）", true, "場所・時間帯・登場人物・出来事・物語の流れを日本語で入力（LLMが英訳）"),
-                            sceneFieldCard("quality_control", "禁止事項＆スタイル維持（retention_analysis）", true, "崩れ防止、画風維持、3D化禁止などのネガティブ・クオリティ指示を入力"),
-                            retentionCard,
                             sceneFieldCard("ambient_sound", "環境音 (overall_soundscape)", false, "足音、風の音、ドアの開閉音、雨音などの環境音・効果音を入力"),
                             sceneFieldCard("bgm", "BGM (non_diegetic_music)", false, "N/AでBGM無し（曲調やジャンルを指定する場合はここに入力）")
                         );
@@ -3285,16 +3390,21 @@ app.registerExtension({
                                             preset:String(wMap[`char${i}_preset`]?.value||''),
                                             extra:String(wMap[`char${i}_extra`]?.value||'')});
                                     }else if(String(wMap[`subject_def_${i}`]?.value||'').trim()){
-                                        sourceSubjects.push({slot:i,kind:String(wMap[`subject_kind_${i}`]?.value||'オブジェクト'),
-                                            definition:String(wMap[`subject_def_${i}`]?.value||'')});
+                                        const referencedInBase = directorSnapshot().some(shot => shot.enabled &&
+                                            new RegExp(`<\\s*Subject\\s*${i}\\s*>`, 'i').test(String(shot.action||'')));
+                                        if (isReferenceMode() || referencedInBase) {
+                                            sourceSubjects.push({slot:i,kind:String(wMap[`subject_kind_${i}`]?.value||'オブジェクト'),
+                                                definition:String(wMap[`subject_def_${i}`]?.value||'')});
+                                        }
                                     }
                                 }
                                 const source={
-                                    overall_story:String(wMap.overall_story?.value||''),
+                                    overall_story:isReferenceMode() ? String(wMap.overall_story?.value||'') : '',
                                     shots:directorSnapshot().map((x,i)=>({...x,shot:i+1})).filter(x=>x.enabled),
                                     subjects:sourceSubjects,
-                                    quality_control:String(wMap.quality_control?.value||''),
+                                    quality_control:isReferenceMode() ? String(wMap.quality_control?.value||'') : '',
                                     creative_mode:String(wMap.creative_mode?.value||'オフ'),
+                                    generation_mode:getGenerationMode(),
                                     ambient_sound:String(wMap.ambient_sound?.value||''),
                                     bgm:String(wMap.bgm?.value||'')
                                 };
@@ -3480,6 +3590,8 @@ app.registerExtension({
                             
                             const payload = { target_clip: "base" };
                             (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
+                            for (let i = 1; i <= 5; i++) payload[`char${i}_enabled`] = charEnabledState[i];
+                            for (let i = 1; i <= 4; i++) payload[`shot${i}_enabled`] = shotEnabledState[i];
                             try {
                                 const parsed = h3ParseClipSettings(wMap["clips_data_json"].value);
                                 Object.assign(payload, parsed);
@@ -3814,6 +3926,8 @@ app.registerExtension({
                             if (selected.auto) {
                                 const freshAuto = h3ParseClipSettings(wMap.auto_data?.value);
                                 autoState = {enabled:false,directorMode:"detailed",overwrite:false,noClips:false,duration:5,clipCount:1,story:"",...freshAuto};
+                                if (!autoState.uiCollapsed || typeof autoState.uiCollapsed !== "object" ||
+                                    Array.isArray(autoState.uiCollapsed)) autoState.uiCollapsed = {};
                             }
                             if (selected.prompt) promptCheckState = null;
                             lastFocusedInput = null;
@@ -4028,6 +4142,7 @@ app.registerExtension({
                     for (let i = 0; i < 9; i++) {
                         buildSlot(imgLane, "image", i, "image/*");
                     }
+                    if (isReferenceMode()) mediaBody.appendChild(imgBlock);
 
                     const kfBlock = document.createElement("div");
                     kfBlock.className = "h3-lane-block";
@@ -4035,8 +4150,11 @@ app.registerExtension({
                     const kfLane = document.createElement("div");
                     kfLane.className = "h3-lane";
                     kfBlock.appendChild(kfLane);
-                    buildSlot(kfLane, "keyframe", 0, "image/*", true, "開始");
-                    buildSlot(kfLane, "keyframe", 1, "image/*", true, "終了");
+                    if (getGenerationMode() === "I2VA" || getGenerationMode() === "FL2VA" || isReferenceMode())
+                        buildSlot(kfLane, "keyframe", 0, "image/*", true, "開始");
+                    if (getGenerationMode() === "FL2VA" || isReferenceMode())
+                        buildSlot(kfLane, "keyframe", 1, "image/*", true, "終了");
+                    if (getGenerationMode() !== "T2VA") mediaBody.appendChild(kfBlock);
 
                     const vidBlock = document.createElement("div");
                     vidBlock.className = "h3-lane-block";
@@ -4047,6 +4165,7 @@ app.registerExtension({
                     for (let i = 0; i < 2; i++) {
                         buildSlot(vidLane, "video", i, "video/*");
                     }
+                    if (isReferenceMode()) mediaBody.appendChild(vidBlock);
 
                     const audBlock = document.createElement("div");
                     audBlock.className = "h3-lane-block";
@@ -4056,10 +4175,12 @@ app.registerExtension({
                     audLane.style.flexWrap = "wrap";
                     audBlock.appendChild(audLane);
                     
-                    for (let i = 0; i < 3; i++) {
-                        buildSlot(audLane, "audio", i, "audio/*");
+                    if (isReferenceMode()) {
+                        for (let i = 0; i < 3; i++) {
+                            buildSlot(audLane, "audio", i, "audio/*");
+                        }
                     }
-                    
+
                     const spacer = document.createElement("div");
                     spacer.style.width = "12px";
                     audLane.appendChild(spacer);
@@ -4067,7 +4188,7 @@ app.registerExtension({
                     buildSlot(audLane, "audio", 3, "audio/*", false, "Drive");
                     buildSlot(audLane, "audio", 4, "audio/*", false, "Final");
 
-                    mediaBody.append(imgBlock, kfBlock, vidBlock, audBlock);
+                    mediaBody.appendChild(audBlock);
                 };
 
                 if (node.addDOMWidget) {
@@ -4126,16 +4247,16 @@ app.registerExtension({
                         }
                     } catch(e){}
                     clipData = h3ParseClipSettings(wMap["clips_data_json"]?.value);
+                    syncGenerationMode();
 
                     renderTabContent();
                     renderFixedMediaLanes();
 
                     for (let i = 1; i <= 5; i++) {
                         const isEnabled = wMap[`char${i}_enabled`] ? !!wMap[`char${i}_enabled`].value : (i === 1);
-                        if (!isEnabled) {
-                            syncRefModRemote(i, "None");
-                        } else if (wMap[`char${i}_refmod`]) {
-                            syncRefModRemote(i, wMap[`char${i}_refmod`].value);
+                        if (isReferenceMode()) {
+                            if (!isEnabled) syncRefModRemote(i, "None");
+                            else if (wMap[`char${i}_refmod`]) syncRefModRemote(i, wMap[`char${i}_refmod`].value);
                         }
                     }
                     
