@@ -436,6 +436,77 @@ def _h3_validate_ref_prompt(prompt, shot_count, phase):
             raise H3RefPromptValidationError(f"REF2VA/HYBRID {phase}のショット{shot.group(1)}の本文が空です。")
 
 
+def _h3_translate_retention_style(text, provider, api_key, model_name):
+    sources = [part.strip() for part in re.split(r"(?<=[。！？])|\r?\n", text) if part.strip()]
+    pending = {str(index): source for index, source in enumerate(sources, 1) if contains_japanese(source)}
+    translations = {str(index): source for index, source in enumerate(sources, 1) if not contains_japanese(source)}
+    tag_pattern = re.compile(r"<[ \t]*/?[ \t]*[A-Za-z][^<>\r\n]*>")
+    cel_shading_source = re.compile(r"(?:[2２二]\s*段階|[2２二]\s*トーン).*?セル[・\s]*シェーディング")
+    cel_shading_translation = re.compile(
+        r"\b(?:two|2)[\s-]+(?:tone|level|step|stage|band)s?\b|\b(?:two|2)\s+(?:shades|tones|levels)\b",
+        re.I,
+    )
+    flat_colors_translation = re.compile(
+        r"\b(?:flat|solid|unshaded)[\s-]+(?:base[\s-]+)?(?:colou?rs?|fills?|colou?ring)\b", re.I,
+    )
+    retry_reason = ""
+    for attempt in range(1, 3):
+        schema = {
+            "type": "object",
+            "properties": {key: {"type": "string"} for key in pending},
+            "required": list(pending),
+            "additionalProperties": False,
+        }
+        request = (
+            "Translate each numbered Japanese animation style instruction into English. "
+            "Return a JSON object with exactly the same keys and one full translation per key. "
+            "Translate every clause and preserve all quantities, visual details, and prohibitions. "
+            "Keep any angle-bracket tags already present verbatim, including their number of occurrences. "
+            "Do not introduce tags, headings, extra instructions, or explanations. "
+            "Use natural animation terminology, such as hand-drawn key poses and weight shifts.\n"
+            f"{retry_reason}\n"
+            f"{json.dumps(pending, ensure_ascii=False)}"
+        )
+        try:
+            result = _h3_base_parse_json_object(call_llm(
+                request, provider, api_key, model_name, 0.0, json_schema=schema,
+            ))
+        except Exception as exc:
+            raise H3RefPromptValidationError(f"作画・禁止事項の翻訳に失敗しました（{exc}）。") from exc
+
+        issues = []
+        if not isinstance(result, dict) or result.keys() - pending.keys():
+            issues.append("Return only a JSON object with the requested keys.")
+        else:
+            for key, source in list(pending.items()):
+                value = result.get(key)
+                if not isinstance(value, str) or value.strip().upper() in {"", "N/A", "NONE"} or contains_japanese(value):
+                    issues.append(f"Item {key}: supply the full English translation.")
+                elif sorted(tag_pattern.findall(value)) != sorted(tag_pattern.findall(source)):
+                    issues.append(f"Item {key}: preserve only the original angle-bracket tags.")
+                elif _H3_REF_SECTION_HEADER.search(value) or _H3_REF_SHOT_HEADER.search(value):
+                    issues.append(f"Item {key}: remove generated section or shot headings.")
+                elif cel_shading_source.search(source) and not (
+                    cel_shading_translation.search(value) and re.search(r"\bcel[\s-]+shad(?:ing|ed)\b", value, re.I)
+                ):
+                    issues.append(f"Item {key}: retain the two-tone cel shading requirement.")
+                elif "ベタ塗り" in source and not flat_colors_translation.search(value):
+                    issues.append(f"Item {key}: retain the flat color requirement.")
+                else:
+                    translations[key] = value.strip()
+                    del pending[key]
+        if not pending:
+            return "\n".join(translations[str(index)] for index in range(1, len(sources) + 1))
+        retry_reason = " ".join(issues)
+        print(f"[H3 Prompt Director] Retention style translation {attempt}/2: {retry_reason}")
+
+    raise H3RefPromptValidationError(
+        "作画・禁止事項の翻訳を検証できませんでした。"
+        f"確認できなかった入力文: {', '.join(pending)}。"
+        "コンソールに検証内容を出力しました。"
+    )
+
+
 def convert_named_subjects(text, names, *, ignore_case=False, slots=None):
     """Exact, silent replacement of explicit aliases; leaves existing tags untouched."""
     if not isinstance(text, str) or not isinstance(names, dict):
@@ -1028,23 +1099,10 @@ def build_and_generate_prompt(kwargs):
 
     quality_text = str(kwargs.get("quality_control", "") or "").strip()
     if quality_text:
-        global_constraint = quality_text
-        if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", quality_text):
-            try:
-                translated = call_llm(
-                    "Translate the following Japanese video style constraints into concise English. "
-                    "Keep every prohibition and requirement. Do not add new rules. "
-                    "Keep <Subject N> and <Audio N> tags exactly as written. "
-                    "Return only the translation.\n\n" + quality_text,
-                    provider, api_key, model_name, 0.0
-                )
-                translated = str(translated or "").strip()
-                if translated and not re.search(r"[\u3040-\u30ff\u3400-\u9fff]", translated):
-                    global_constraint = translated
-                else:
-                    print("[H3 Prompt Director] Retention style translation incomplete; keeping original constraints")
-            except Exception as exc:
-                print(f"[H3 Prompt Director] Retention style translation failed; keeping original constraints: {exc}")
+        global_constraint = (
+            _h3_translate_retention_style(quality_text, provider, api_key, model_name)
+            if contains_japanese(quality_text) else quality_text
+        )
         retention_lines.append("Global style and prohibitions (user-defined): " + global_constraint)
 
     retention_body = "\n".join(retention_lines) if retention_lines else "N/A"
