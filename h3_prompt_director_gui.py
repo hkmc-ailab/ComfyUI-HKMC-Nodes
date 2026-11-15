@@ -394,7 +394,49 @@ def silence_shot_text(action):
     return "Speech: " + instruction
 
 
-def convert_named_subjects(text, names):
+_REF2VA_SILENT_SHOT = (
+    "Speech: No dialogue or vocal sounds. No speech-related lip movement. "
+    "Preserve the specified expressions, actions, ambience, sound effects, and music."
+)
+
+_H3_REF_SECTIONS = (
+    "subject_definitions", "summary", "retention_analysis",
+    "detailed_description", "overall_soundscape", "non_diegetic_music",
+)
+_H3_REF_SECTION_HEADER = re.compile(r"(?im)^[ \t]*(" + "|".join(_H3_REF_SECTIONS) + r")[ \t]*:[ \t]*")
+_H3_REF_SHOT_HEADER = re.compile(
+    r"(?im)^[ \t]*\[Shot[ \t]+(\d+)(?:[ \t]*\|[^\]\n]+)?\]"
+    r"(?:[ \t]+At[ \t]+\d+:\d+(?:\.\d+)?,)?"
+)
+
+
+class H3RefPromptValidationError(ValueError):
+    pass
+
+
+def _h3_validate_ref_prompt(prompt, shot_count, phase):
+    headers = list(_H3_REF_SECTION_HEADER.finditer(prompt))
+    names = [header.group(1).lower() for header in headers]
+    if names != list(_H3_REF_SECTIONS):
+        missing = [name for name in _H3_REF_SECTIONS if name not in names]
+        reason = "不足: " + ", ".join(missing) if missing else "セクションの順序不正または重複"
+        raise H3RefPromptValidationError(f"REF2VA/HYBRID {phase}の6セクションを確認できません（{reason}）。")
+
+    detail = prompt[headers[3].end():headers[4].start()]
+    shots = list(_H3_REF_SHOT_HEADER.finditer(detail))
+    numbers = [int(shot.group(1)) for shot in shots]
+    expected = list(range(1, shot_count + 1))
+    if numbers != expected:
+        raise H3RefPromptValidationError(
+            f"REF2VA/HYBRID {phase}のショット番号が一致しません（期待: {expected}、実際: {numbers}）。"
+        )
+    for index, shot in enumerate(shots):
+        end = shots[index + 1].start() if index + 1 < len(shots) else len(detail)
+        if detail[shot.end():end].strip().upper() in ("", "N/A", "NONE"):
+            raise H3RefPromptValidationError(f"REF2VA/HYBRID {phase}のショット{shot.group(1)}の本文が空です。")
+
+
+def convert_named_subjects(text, names, *, ignore_case=False, slots=None):
     """Exact, silent replacement of explicit aliases; leaves existing tags untouched."""
     if not isinstance(text, str) or not isinstance(names, dict):
         return text if isinstance(text, str) else ""
@@ -405,13 +447,24 @@ def convert_named_subjects(text, names):
         name = raw.strip()
         if not name or re.fullmatch(r"<\s*Subject\s+[1-5]\s*>", name, re.I):
             continue
-        aliases.setdefault(name, set()).add(int(key))
-    unique = {name: next(iter(indices)) for name, indices in aliases.items() if len(indices) == 1}
+        aliases.setdefault(name.lower() if ignore_case else name, set()).add(int(key))
+    unique = {
+        name: next(iter(indices))
+        for name, indices in aliases.items()
+        if len(indices) == 1 and (slots is None or indices <= slots)
+    }
     if not unique:
         return text
     alternatives = "|".join(re.escape(name) for name in sorted(unique, key=len, reverse=True))
-    pat = re.compile(r"<[^>]*>|(?<![A-Za-z0-9_])(?:" + alternatives + r")(?![A-Za-z0-9_])")
-    return pat.sub(lambda m: m.group(0) if m.group(0).startswith("<") else f"<Subject {unique[m.group(0)]}>", text)
+    pat = re.compile(r"<[^>]*>|(?<![A-Za-z0-9_])(?:" + alternatives + r")(?![A-Za-z0-9_])",
+                     re.IGNORECASE if ignore_case else 0)
+
+    def replace(match):
+        value = match.group(0)
+        index = unique.get(value.lower() if ignore_case else value)
+        return f"<Subject {index}>" if index is not None else value
+
+    return pat.sub(replace, text)
 
 
 @PromptServer.instance.routes.post("/h3/convert_subject_names")
@@ -493,6 +546,7 @@ def build_and_generate_prompt(kwargs):
 
         char_refs[subj_idx] = {
             "label": label,
+            "description": "\n".join((base_text, extra)),
             "pics": pic_tags,
             "pics_str": pics_str,
             "audio": audio_ref if audio_ref != "None" else None,
@@ -526,16 +580,13 @@ def build_and_generate_prompt(kwargs):
     char_description = process_wildcards("\n\n".join(subjects))
 
     shots = []
-    saved_dialogues = {}
-    enabled_shot_count = 0
-    silent_shot_count = 0
+    shot_speech_lines = {}
 
     shot_counter = 0
     for i in range(1, 5):
         if not kwargs.get(f"shot{i}_enabled", False):
             continue
         shot_counter += 1
-        enabled_shot_count += 1
 
         raw_time = kwargs.get(f"shot{i}_time", "").strip()
         norm_time = normalize_time_expression(raw_time)
@@ -548,30 +599,20 @@ def build_and_generate_prompt(kwargs):
         if action:
             content.append(f"Action/Camera: {action}")
 
-        if speaker_choice in ("None", "セリフなし") or not dialogue_raw.strip():
-            silent_shot_count += 1
-            content.append(silence_shot_text(action))
-        else:
-            dia_lines = []
-            lines = [l.strip() for l in dialogue_raw.split("\n") if l.strip()]
-            for line in lines:
-                dia = line
-                dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
+        dia_lines = []
+        if speaker_choice not in ("None", "セリフなし"):
+            speaker_match = re.fullmatch(r"S([1-5])", speaker_choice, re.IGNORECASE)
+            speaker_prefix = f"<Subject {speaker_match.group(1)}> says: " if speaker_match else ""
+            for line in dialogue_raw.splitlines():
+                dia = re.sub(
+                    r"^(?:S\d+|<Subject\s+[1-5]>(?:\s+says)?)\s*:\s*",
+                    "", line.strip(), flags=re.IGNORECASE,
+                )
                 dia = re.sub(r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*", "", dia, flags=re.IGNORECASE)
                 dia = re.sub(r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE).strip().strip('"').strip("'")
                 if dia:
-                    if speaker_choice.startswith("S") and speaker_choice[1:].isdigit():
-                        dia_lines.append(f"{speaker_choice}: <d>[Japanese] {dia} </d>")
-                    else:
-                        dia_lines.append(f"<d>[Japanese] {dia} </d>")
-            
-            if dia_lines:
-                saved_dialogues[shot_counter] = dia_lines
-                if speaker_choice.startswith("S") and speaker_choice[1:].isdigit():
-                    subj_num = speaker_choice[1:]
-                    content.append(f"(Note for translation: Ensure <Subject {subj_num}> is described as visibly speaking/talking. DO NOT insert any <Audio> tags.)")
-                else:
-                    content.append(f"(Note for translation: Ensure the speaker is described as visibly speaking/talking. DO NOT insert any <Audio> tags.)")
+                    dia_lines.append(f"{speaker_prefix}<d>[Japanese] {dia} </d>")
+        shot_speech_lines[shot_counter] = dia_lines or [_REF2VA_SILENT_SHOT]
 
         if content:
             shots.append(f"[Shot {shot_counter} | {norm_time}]\n" + "\n".join(content))
@@ -596,13 +637,17 @@ def build_and_generate_prompt(kwargs):
     else:
         creative_instruction = "  Translate the situation faithfully and concisely into English without inventing unmentioned locations, objects, or extra context."
 
-    silent_summary = ""
-    silent_desc = ""
-    silent_sound = ""
-    if enabled_shot_count > 0 and silent_shot_count == enabled_shot_count:
-        silent_summary = "\n[CRITICAL RULE]: All characters remain non-vocal throughout the entire video. Do not describe conversation, dialogue, or vocal reactions in the summary."
-        silent_desc = "\n[CRITICAL RULE]: No character speaks or makes any vocal reaction. Preserve every specified action and facial expression; avoid speech-related mouth movements and lip synchronization."
-        silent_sound = "\n[CRITICAL RULE]: No human speech or speech-like vocalizations of any kind. No intelligible or unintelligible words in any language. No dialogue, background chatter, whispering, muttering, babbling, singing, humming, or narration. Do not generate spontaneous voices or vocal sounds. Preserve explicitly requested non-vocal environmental sounds, sound effects, and music."
+    speech_guard = (
+        "\n[SPEECH HANDLING]: In detailed_description, translate the supplied "
+        "action and camera directions only. Do not add dialogue, speaker labels, "
+        "speech instructions, or mouth movements absent from the input. "
+        "Dialogue and silent-shot instructions are added separately."
+    )
+    if shot_speech_lines and all(lines == [_REF2VA_SILENT_SHOT] for lines in shot_speech_lines.values()):
+        speech_guard += (
+            " The video is entirely non-vocal. Keep the requested non-vocal "
+            "ambience, sound effects, and music. Do not echo this instruction."
+        )
 
     summary_subject_roles = []
     for idx in range(1, 6):
@@ -647,15 +692,15 @@ def build_and_generate_prompt(kwargs):
         "English explanation after a token. These tokens are not for summary."
     )
     sys_inst = raw_rules.format(
-        creative_instruction=creative_instruction + silent_summary + summary_guard + shot_tag_guard,
+        creative_instruction=creative_instruction + summary_guard + shot_tag_guard + speech_guard,
         char_description=char_description,
         situation="",
         overall_story=summary_story,
         summary_roles=summary_roles,
         summary_task_tag=summary_task_tag,
-        timeline_seq=silent_desc + "\n" + timeline_seq,
+        timeline_seq=timeline_seq,
         quality_control=kwargs.get("quality_control", ""),
-        ambient_sound=silent_sound + "\n" + kwargs.get("ambient_sound", ""),
+        ambient_sound=kwargs.get("ambient_sound", ""),
         bgm=kwargs.get("bgm", ""),
     )
     
@@ -664,41 +709,110 @@ def build_and_generate_prompt(kwargs):
     model_name = kwargs.get("llm_model", "").strip()
     temp = 0.7 if creative_mode != "オフ" else 0.3
 
-    prompt_result = call_llm(sys_inst, provider, api_key, model_name, temp)
+    request = sys_inst
+    for attempt in range(1, 4):
+        prompt_result = call_llm(request, provider, api_key, model_name, temp)
+        try:
+            _h3_validate_ref_prompt(prompt_result, shot_counter, "LLM応答")
+        except H3RefPromptValidationError as exc:
+            print(f"[H3 Prompt Director] {attempt}/3: {exc}")
+            if attempt == 3:
+                raise
+            request = (
+                sys_inst + "\n\n[FORMAT RETRY] Return all six required sections in order. "
+                f"Include exactly {shot_counter} shots in detailed_description, each with its original "
+                "shot number, time and nonempty action or camera description. Check the structure before answering."
+            )
+        else:
+            break
+    prompt_result = _H3_REF_SECTION_HEADER.sub(
+        lambda m: m.group(1).lower() + ":" + ("" if m.string[m.end():m.end() + 1] in ("\r", "\n") else "\n"),
+        prompt_result,
+    )
     prompt_result = re.sub(
         r"H3SHOTSUBJECTTOKEN([1-5])END",
         lambda m: f"<Subject {m.group(1)}>",
         prompt_result, flags=re.I,
     )
 
-    stage_text = ""  
     story_text = summary_story
-    explicit_tags = set(re.findall(r"<Subject\s+([1-5])>", stage_text + "\n" + story_text, re.I))
+    explicit_tags = set(re.findall(r"<Subject\s+([1-5])>", story_text, re.I))
 
     def protect_subject_tags(value):
         return re.sub(r"<Subject\s+([1-5])>",
                       lambda m: "H3SUBJECTTOKEN" + m.group(1) + "END",
                       value, flags=re.I)
 
-    protected_stage = protect_subject_tags(stage_text)
     protected_story = protect_subject_tags(story_text)
+
+    def summary_pronoun_cues(description):
+        explicit = set(re.findall(r"\b(she/her|he/him|they/them)\b", description.lower()))
+        if explicit:
+            return explicit
+        cues = set()
+        if re.search(r"\b(?:female|woman|women|\d*girls?)\b|女性|女の子|少女|彼女", description, re.I):
+            cues.add("she/her")
+        if re.search(r"\b(?:male|man|men|\d*boys?)\b|男性|男の子|少年", description, re.I):
+            cues.add("he/him")
+        return cues
+
+    pronoun_hints = []
+    allowed_gendered_pronouns = summary_pronoun_cues(story_text)
+    for idx, refs in char_refs.items():
+        name = refs["label"]
+        named_in_story = re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", story_text, re.I)
+        if not named_in_story and str(idx) not in explicit_tags:
+            continue
+        pronouns = summary_pronoun_cues(process_wildcards(refs["description"]))
+        if len(pronouns) == 1:
+            pronoun = next(iter(pronouns))
+            allowed_gendered_pronouns.add(pronoun)
+            label = name
+            if str(idx) in explicit_tags:
+                label += f" (<Subject {idx}>)"
+            pronoun_hints.append(f"{label}: {pronoun}")
+
+    for idx in sorted(explicit_tags - {str(index) for index in char_refs}):
+        if kwargs.get(f"subject_kind_{idx}") != "人物":
+            continue
+        pronouns = summary_pronoun_cues(kwargs.get(f"subject_def_{idx}", ""))
+        if len(pronouns) == 1:
+            pronoun = next(iter(pronouns))
+            allowed_gendered_pronouns.add(pronoun)
+            pronoun_hints.append(f"<Subject {idx}>: {pronoun}")
+
+    summary_pronoun_rule = (
+        "Do not guess anyone's pronouns from their name. Use a name or the existing "
+        "subject reference if pronouns are unknown or the referent is unclear.\n"
+    )
+    if pronoun_hints:
+        summary_pronoun_rule += (
+            "Character pronouns (grammar only; do not add characters, attributes, "
+            "or subject references to the synopsis): " + "; ".join(pronoun_hints) + ".\n"
+        )
+    pronoun_forms = {
+        "he/him": r"\b(?:he|him|his|himself)\b",
+        "she/her": r"\b(?:she|her|hers|herself)\b",
+    }
+
+    summary_subject_rule = (
+        "Copy the protected subject markers from the synopsis exactly, including their numbers. "
+        "Keep character names as written. Do not introduce subject markers absent from the synopsis.\n"
+        if explicit_tags else
+        "Keep character names as written. Do not replace names with subject tags or add any subjects.\n"
+    )
     summary_input = (
-        "Translate the Japanese Stage and Overall Synopsis into ONE short natural "
+        "Translate the supplied synopsis into one short natural "
         "English overview of the entire video. Do not include any shot details, "
         "camera directions, shot numbers, timestamps, dialogue, or invented events.\n"
-        "IMPORTANT: H3SUBJECTTOKEN1END through H3SUBJECTTOKEN5END are immutable "
-        "names of subjects, NOT words to translate or expand. Reproduce each "
-        "token EXACTLY where its subject occurs. Never substitute a person's "
-        "name or an object's description for a token.\n"
+        f"{summary_subject_rule}"
         "Do not include headings, task tags, markdown, or explanations.\n"
         "If the synopsis is brief, the output must be brief.\n"
-        "Subject roles (context only; do not add missing subjects):\n"
-        f"{summary_roles}\n"
-        f"Stage: {protected_stage}\n"
-        f"Overall Synopsis: {protected_story}\n"
     )
+
     def clean_summary_translation(raw):
         raw = re.sub(r"(?i)^\s*(?:summary\s*:\s*|\[reference generation(?: \+ audio reference)?\]\s*|\[audio reference\]\s*)+", "", raw.strip())
+        raw = re.sub(r"(?im)^[ \t]*Setting[ \t]*:[ \t]*(?:Stage\.?[ \t]*)?(?:\r?\n|$)(?:[ \t]*\r?\n)*", "", raw)
         return raw.strip("` \n")
 
     def restore_marker_variants(body):
@@ -707,10 +821,17 @@ def build_and_generate_prompt(kwargs):
 
     def summary_is_valid(body):
         found = set(re.findall(r"H3SUBJECTTOKEN([1-5])END", body))
-        if found - explicit_tags or re.search(r"(?i)H3SUBJECTTOKEN(?![1-5]END)", body):
-            return False, "unregistered or malformed subject token"
+        if found - explicit_tags:
+            return False, "subject markers absent from the source synopsis"
+        if re.search(r"(?i)H3SUBJECTTOKEN(?![1-5]END)|<\s*(?:Subject|S)\b", body):
+            return False, "malformed subject marker"
         if not body or contains_japanese(body) or not explicit_tags.issubset(found):
             return False, "missing markers or untranslated Japanese"
+        if pronoun_hints:
+            for pronoun, pattern in pronoun_forms.items():
+                if pronoun not in allowed_gendered_pronouns and re.search(pattern, body, re.I):
+                    if not re.search(pattern, story_text, re.I) and not (pronoun == "he/him" and re.search(r"彼(?!女|ら|達|たち)", story_text)):
+                        return False, f"{pronoun} is unsupported; use the character name or original tag"
         if re.search(r"(?i)\b(?:in the (?:first|second|third|next|final) shot|shot\s*\d+|camera pans?|camera zooms?|close[- ]up angle|full[- ]body angle)\b", body):
             return False, "shot-level details"
         if re.fullmatch(r"(?is)the video (?:features|shows|includes)\s+[\w\s,<>.]+", body) and not re.search(r"(?i)\b(?:walks?|arrives?|reaches?|enters?|leaves?|runs?|talks?|meets?|finds?|opens?|closes?|moves?|travels?|looks?|stands?|sits?|falls?|flies?|drives?|discovers?|approaches?)\b", body):
@@ -720,19 +841,20 @@ def build_and_generate_prompt(kwargs):
     summary_body = ""
     for attempt in range(4):
         if attempt < 2:
-            request = summary_input + ("\nReturn only the English summary. Copy the marker names exactly; never expand them." if attempt else "")
+            request = summary_input + summary_pronoun_rule + f"\nSynopsis: {protected_story}\n"
         else:
             request = (
-                "Translate the following Japanese setting and synopsis into one concise, "
+                "Translate the following synopsis into one concise, "
                 "natural English video summary. Keep EVERY literal <Subject N> reference "
                 "as <Subject N>, including its number; do not replace it with a name "
                 "or description. Translate WHOLE SENTENCES, not fragments. "
                 "Do not mention shots, cameras, or events absent from the synopsis. "
                 "Output only the English summary, without a heading.\n"
-                f"Stage: {stage_text}\nOverall Synopsis: {story_text}\n"
+                f"{summary_pronoun_rule}"
+                f"Synopsis: {story_text}\n"
             )
-            if attempt == 3:
-                request += "The last answer was invalid. Preserve the literal Subject references and the actions in the synopsis.\n"
+        if attempt:
+            request += f"\nThe previous answer failed validation ({reason}). Return only a faithful English translation."
         candidate = clean_summary_translation(call_llm(request, provider, api_key, model_name, temp=0.2))
         candidate = restore_marker_variants(candidate)
         candidate = protect_subject_tags(candidate)
@@ -744,7 +866,7 @@ def build_and_generate_prompt(kwargs):
         print(f"[H3 Prompt Director] summary rejected (attempt {attempt + 1}/4): {reason}; draft={candidate[:250]!r}")
 
     if not summary_body:
-        raise ValueError(
+        raise H3RefPromptValidationError(
             "Summary whole-sentence translation failed after 4 attempts. "
             "Check the H3 Prompt Director console for rejected drafts and reasons."
         )
@@ -773,39 +895,6 @@ def build_and_generate_prompt(kwargs):
     prompt_result = re.sub(r"(?im)^Vocal reference for\s+[\w\s]+\s+is\s+<Audio\s*\d+>.*$", "", prompt_result)
     prompt_result = re.sub(r"Action/Camera:\s*", "", prompt_result)
     prompt_result = re.sub(r"\[CRITICAL RULE\]:\s*", "", prompt_result, flags=re.IGNORECASE)
-
-    for shot_idx, dia_lines in saved_dialogues.items():
-        if not dia_lines:
-            continue
-            
-        start_marker = f"[Shot {shot_idx}"
-        start_idx = prompt_result.find(start_marker)
-        
-        if start_idx != -1:
-            next_shot_idx = prompt_result.find(f"[Shot {shot_idx + 1}", start_idx)
-            
-            sec_positions = []
-            for sec_name in ["overall_soundscape", "non_diegetic_music", "retention_analysis"]:
-                m = re.search(rf"(?i)(\[{sec_name}\]|{sec_name}:)", prompt_result[start_idx:])
-                if m:
-                    sec_positions.append(start_idx + m.start())
-            
-            next_sec_idx = min(sec_positions) if sec_positions else len(prompt_result)
-            end_idx = next_shot_idx if next_shot_idx != -1 else next_sec_idx
-
-            shot_text = prompt_result[start_idx:end_idx].rstrip()
-            shot_text = re.sub(
-                r"(?im)^[ \t]*(?:Speech:[ \t]*)?(?:No dialogue|No speech|No character speaks|All characters remain non-vocal)\b[^\n]*\n?",
-                "",
-                shot_text,
-            )
-            shot_text = re.sub(
-                r"(?im)^[ \t]*\(Note for translation:[^\n]*\)[ \t]*\n?",
-                "",
-                shot_text,
-            ).rstrip()
-            injected_dialogues = "\n" + "\n".join(dia_lines) + "\n\n"
-            prompt_result = prompt_result[:start_idx] + shot_text + injected_dialogues + prompt_result[end_idx:]
 
     for idx, refs in sorted(char_refs.items(), key=lambda x: x[0]):
         label = refs["label"]
@@ -982,43 +1071,26 @@ def build_and_generate_prompt(kwargs):
     _detail_section = re.compile(
         r"(?ims)(^detailed_description:\s*\n)(.*?)(?=^(?:overall_soundscape|non_diegetic_music):|\Z)"
     )
-    _shot_header = re.compile(r"(?m)^\[Shot\s+(\d+)\s*\|\s*([^]\n]+)\]")
+    _shot_header = re.compile(r"(?im)^[ \t]*\[Shot[ \t]+(\d+)[ \t]*\|[ \t]*([^]\n]+)\]")
     prompt_result = _detail_section.sub(
         lambda section: section.group(1) + _shot_header.sub(_format_output_shot_header, section.group(2)),
         prompt_result, count=1
     )
 
-    shot_protected_lines = {}
-    for shot_number, original in enumerate(shots, 1):
-        shot_protected_lines[shot_number] = [
-            line.strip() for line in original.splitlines()
-            if line.strip().startswith("Speech:") or
-            re.match(r"^S\d+:\s*<d>", line.strip())
-        ]
-
-        if saved_dialogues.get(shot_number):
-            shot_protected_lines[shot_number] = list(saved_dialogues[shot_number])
+    character_names = {index: refs["label"] for index, refs in char_refs.items()}
 
     def _repair_shot_subjects(section):
         head, detail = section.group(1), section.group(2)
-        header_pattern = re.compile(r"(?m)^\[Shot\s+(\d+)\](?:\s+At\s+[^\n]*)?")
-        headers = list(header_pattern.finditer(detail))
+        headers = list(_H3_REF_SHOT_HEADER.finditer(detail))
         if not headers:
             return section.group(0)
         parts = []
         for pos, match in enumerate(headers):
             end = headers[pos + 1].start() if pos + 1 < len(headers) else len(detail)
-            chunk = detail[match.start():end]
             shot_num = int(match.group(1))
             required = shot_subject_tags.get(shot_num, set())
             header = match.group(0)
-            protected = shot_protected_lines.get(shot_num, [])
-
-            def strip_control_lines(value):
-                return "\n".join(line for line in value.splitlines()
-                                 if not line.strip().startswith("Speech:")
-                                 and not re.match(r"^S\d+:\s*", line.strip())
-                                 and not re.search(r"<d>.*?</d>", line, re.I))
+            protected = shot_speech_lines.get(shot_num, [])
 
             def _remove_generated_silence_sentences(text):
                 silence_sentence = re.compile(
@@ -1031,17 +1103,25 @@ def build_and_generate_prompt(kwargs):
                 cleaned = re.sub(r"(?m)^[ \t]*[.!][ \t]*$", "", cleaned)
                 return cleaned.strip()
 
-            def rebuild(value):
-                body = strip_control_lines(value[len(header):] if value.startswith(header) else value).strip()
+            def clean_narration(body):
+                body = re.sub(r"(?is)<d>.*?</d>", "", body)
+                body = re.sub(
+                    r"(?im)^[ \t]*(?:Speech\s*:|S\d+\s*:|"
+                    r"<Subject\s+[1-5]>(?:\s+says)?\s*:|\(Note for translation:|"
+                    r"No dialogue\b|No speech\b|No character speaks\b|"
+                    r"All characters remain non-vocal\b|Referenced subjects?(?: in this shot)?\s*:)[^\n]*(?:\n|$)",
+                    "", body,
+                )
                 body = _remove_generated_silence_sentences(body)
-                body = re.sub(r"(?m)^Referenced subjects in this shot:.*(?:\n|$)", "", body).strip()
-                return header + "\n" + body + ("\n" if body else "") + ("\n".join(protected) + "\n" if protected else "")
+                return body.strip()
 
-            chunk = rebuild(chunk)
-            present = set(re.findall(r"<Subject\s+([1-5])>", chunk, re.I))
-            missing = sorted(required - present)
+            narration = clean_narration(detail[match.end():end])
+            present = set(re.findall(r"<Subject\s+([1-5])>", narration, re.I))
+            missing = required - present
             if missing:
-                prose = strip_control_lines(chunk[len(header):]).strip()
+                narration = convert_named_subjects(narration, character_names, ignore_case=True, slots={int(n) for n in missing})
+                missing = required - set(re.findall(r"<Subject\s+([1-5])>", narration, re.I))
+            if missing:
                 request = (
                     "Revise ONLY this English camera/action narration. Restore each "
                     "missing literal <Subject N> tag INLINE at the noun phrase it "
@@ -1050,49 +1130,27 @@ def build_and_generate_prompt(kwargs):
                     "speech instructions, dialogue, or reference list. Output only "
                     "the revised action narration.\n"
                     f"Required subject tags: {', '.join('<Subject '+n+'>' for n in sorted(required))}\n"
-                    f"Narration: {prose}"
+                    f"Narration: {narration}"
                 )
                 try:
                     candidate = str(call_llm(request, provider, api_key, model_name, 0.0) or '').strip()
                     candidate = re.sub(r"H3SHOTSUBJECTTOKEN([1-5])END",
                                        lambda m: f"<Subject {m.group(1)}>", candidate, flags=re.I)
+                    candidate = clean_narration(candidate)
                     found = set(re.findall(r"<Subject\s+([1-5])>", candidate, re.I))
-                    if required.issubset(found) and found.issubset(required) and not re.search(r"(?m)^\[Shot|^Referenced subjects", candidate):
-                        chunk = rebuild(header + "\n" + candidate)
+                    if required == found and not contains_japanese(candidate) and not _H3_REF_SHOT_HEADER.search(candidate) and not _H3_REF_SECTION_HEADER.search(candidate):
+                        narration = candidate
                 except Exception as exc:
                     print(f"[H3 Prompt Director] shot {shot_num} tag repair failed: {exc}")
 
-                still_missing = sorted(required - set(re.findall(r"<Subject\s+([1-5])>", chunk, re.I)))
-                for number in still_missing:
-                    kind = kwargs.get(f"subject_kind_{number}", "オブジェクト")
-                    definition = kwargs.get(f"subject_def_{number}", "").lower()
-                    if kind == "背景":
-                        words = ["forest", "woods", "woodland", "landscape", "setting", "background", "city", "street", "room", "beach", "mountain", "sky", "garden"]
-                    elif kind == "人物":
-                        words = ["girl", "boy", "woman", "man", "person", "character", "child"]
-                    else:
-                        words = ["house", "building", "cabin", "home", "door", "car", "vehicle", "object", "tree", "sword", "book", "chair", "table"]
-                    words = [word for _, word in sorted(enumerate(words), key=lambda item: (item[1] not in definition, item[0]))]
-                    narration, sep, controls = chunk.partition("\nSpeech:")
-                    if not sep:
-                        speaker_match = re.search(r"(?m)^S\d+:\s*<d>", chunk)
-                        if speaker_match:
-                            narration, controls = chunk[:speaker_match.start()], chunk[speaker_match.start():]
-                            sep = "\n"
-                    replaced = False
-                    for word in words:
-                        pattern = re.compile(r"\b" + re.escape(word) + r"\b", re.I)
-                        m = pattern.search(narration)
-                        if m:
-                            narration = narration[:m.start()] + f"<Subject {number}>, a " + narration[m.start():]
-                            replaced = True
-                            break
-                    if not replaced:
-                        narration = narration.rstrip() + f"\nReferenced subject: <Subject {number}>."
-                    chunk = narration.rstrip() + (sep + controls if sep else "")
-                    chunk = rebuild(chunk)
-                print(f"[H3 Prompt Director] shot {shot_num}: checked source Subject tags and speech")
-            parts.append(chunk.rstrip() + "\n\n")
+            still_missing = required - set(re.findall(r"<Subject\s+([1-5])>", narration, re.I))
+            if not narration or still_missing:
+                reason = ("アクション・カメラ本文が空です。" if not narration else
+                          "本文に復元できない参照があります（" + ", ".join(f"<Subject {n}>" for n in sorted(still_missing)) + "）。")
+                error = f"REF2VA/HYBRID 最終出力のショット{shot_num}: {reason}"
+                print(f"[H3 Prompt Director] {error}")
+                raise H3RefPromptValidationError(error)
+            parts.append("\n".join(part for part in [header, narration, *protected] if part) + "\n\n")
         return head + detail[:headers[0].start()] + "".join(parts).rstrip() + "\n\n"
 
     prompt_result = _detail_section.sub(_repair_shot_subjects, prompt_result, count=1)
@@ -1101,6 +1159,11 @@ def build_and_generate_prompt(kwargs):
                            lambda m: f"<Subject {m.group(1)}>", prompt_result, flags=re.IGNORECASE)
     prompt_result = re.sub(r"^(summary:)\s*\n+", r"\1\n", prompt_result, flags=re.MULTILINE | re.IGNORECASE)
     prompt_result = re.sub(r"\n{3,}", "\n\n", prompt_result).strip()
+    try:
+        _h3_validate_ref_prompt(prompt_result, shot_counter, "最終出力")
+    except H3RefPromptValidationError as exc:
+        print(f"[H3 Prompt Director] {exc}")
+        raise
 
     return prompt_result
 
@@ -3701,6 +3764,8 @@ class H3PromptDirectorGUI:
         else:
             try:
                 prompt_result = h3_generate_video_prompt(kwargs)
+            except H3RefPromptValidationError:
+                raise
             except Exception as e:
                 prompt_result = f"Error during prompt generation: {e}"
 
