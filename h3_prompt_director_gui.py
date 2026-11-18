@@ -4,6 +4,7 @@ import json
 import base64
 import asyncio
 import mimetypes
+import math
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -14,6 +15,7 @@ import requests
 from openai import OpenAI
 import folder_paths
 import scipy.io.wavfile as wavfile
+from scipy.signal import resample_poly
 from server import PromptServer
 from aiohttp import web
 
@@ -735,18 +737,19 @@ async def handle_convert_subject_names(request):
         return web.json_response({"text": ""})
 
 
-def _h3_ref_subject_sources(kwargs, declared_speakers, *, for_translation=False):
-    def process_wildcards(text):
-        char_dir = os.path.join(os.path.dirname(__file__), "characters")
-        def replace_match(match):
-            char_name = match.group(1)
-            file_path = os.path.join(char_dir, f"{char_name}.txt")
-            if os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f:
-                    return f.read().strip()
-            return match.group(0)
-        return re.sub(r"__([a-zA-Z0-9_-]+)__", replace_match, text)
+def process_wildcards(text):
+    char_dir = os.path.join(os.path.dirname(__file__), "characters")
+    def replace_match(match):
+        char_name = match.group(1)
+        file_path = os.path.join(char_dir, f"{char_name}.txt")
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        return match.group(0)
+    return re.sub(r"__([a-zA-Z0-9_-]+)__", replace_match, text)
 
+
+def _h3_ref_subject_sources(kwargs, declared_speakers, *, for_translation=False):
     def read_char_txt(name):
         if not name or name in ["None", "Custom Text", False]:
             return ""
@@ -3931,54 +3934,118 @@ async def h3_irodori_prepare(request):
         return web.json_response({"success": False, "error": str(exc)}, status=400)
 
 
+def _iro_output_wav(take):
+    if not isinstance(take, dict):
+        raise ValueError("生成テイクの情報を確認してください。")
+    basename = str(take.get("filename", ""))
+    subfolder = str(take.get("subfolder", "")).replace("\\", "/").strip("/")
+    if take.get("type", "output") != "output" or subfolder != "h3_irodori":
+        raise ValueError("Unexpected Irodori output directory")
+    if not basename or "/" in basename or "\\" in basename or not basename.lower().endswith(".wav"):
+        raise ValueError("Unexpected Irodori output WAV filename")
+    root = _IroPath(folder_paths.get_output_directory()).resolve()
+    source_dir = root / "h3_irodori"
+    source = (source_dir / basename).resolve()
+    if not source.is_relative_to(source_dir) or not source.is_file():
+        raise FileNotFoundError(f"生成テイクが見つかりません: {basename}")
+    return source
+
+
+def _iro_write_input_wav(name, write_wav):
+    raw_name = str(name).strip()
+    if raw_name.lower().endswith(".wav"):
+        raw_name = raw_name[:-4]
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
+    if not safe_name or len(safe_name) > 80:
+        raise ValueError("保存名は1〜80文字で入力してください。")
+    if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", safe_name, re.IGNORECASE):
+        raise ValueError("Windowsの予約名は使えません。")
+    input_root = _IroPath(folder_paths.get_input_directory()).resolve()
+    dest_dir = input_root / "h3_irodori"
+    if not dest_dir.resolve().is_relative_to(input_root):
+        raise ValueError("Unexpected Irodori input directory")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    for number in range(1, 10000):
+        suffix = "" if number == 1 else f"_{number}"
+        dest = dest_dir / f"{safe_name}{suffix}.wav"
+        try:
+            output_f = dest.open("xb")
+        except FileExistsError:
+            continue
+        try:
+            with output_f:
+                write_wav(output_f)
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
+        return "h3_irodori/" + dest.name
+    raise ValueError("同名ファイルが多すぎます。別の名前を指定してください。")
+
+
+def _iro_concat_takes(takes, name, gap_seconds):
+    if not isinstance(takes, list) or not takes:
+        raise ValueError("連結する音声をリストに追加してください。")
+    gap_seconds = float(gap_seconds)
+    if not math.isfinite(gap_seconds) or gap_seconds < 0:
+        raise ValueError("セリフ間隔は0秒以上で入力してください。")
+    sources = [_iro_output_wav(take) for take in takes]
+    sample_rate = None
+    gap = None
+    parts = []
+    for source in sources:
+        rate, samples = wavfile.read(source)
+        if rate <= 0 or not samples.size or samples.ndim not in (1, 2):
+            raise ValueError(f"音声データが空か形式が不正です: {source.name}")
+        wave = samples.astype(np.float32)
+        if np.issubdtype(samples.dtype, np.integer):
+            peak = float(1 << (samples.dtype.itemsize * 8 - 1))
+            if np.issubdtype(samples.dtype, np.unsignedinteger):
+                wave -= peak
+            wave /= peak
+        if not np.isfinite(wave).all():
+            raise ValueError(f"音声データに無効なサンプルがあります: {source.name}")
+        if wave.ndim == 2:
+            wave = wave.mean(axis=1)
+        if sample_rate is None:
+            sample_rate = rate
+            gap = np.zeros(round(gap_seconds * rate), dtype=np.int16) if len(sources) > 1 else None
+        elif rate != sample_rate:
+            divisor = math.gcd(rate, sample_rate)
+            wave = resample_poly(wave, sample_rate // divisor, rate // divisor)
+        if parts:
+            parts.append(gap)
+        parts.append(np.rint(np.clip(wave * 32768, -32768, 32767)).astype(np.int16))
+
+    audio = np.concatenate(parts)
+    input_name = _iro_write_input_wav(name, lambda out: wavfile.write(out, sample_rate, audio))
+    return {"success": True, "input_name": input_name, "duration_seconds": len(audio) / sample_rate}
+
+
 @PromptServer.instance.routes.post("/h3/irodori/attach")
 async def h3_irodori_attach(request):
-    """Make completed output WAV available to the existing HKMC AUDIO slots."""
+    """Save a single take to an input slot without changing its audio."""
     try:
         data = await request.json()
-        basename = str(data.get("filename", ""))
-        subfolder = str(data.get("subfolder", ""))
-        file_type = str(data.get("type", "output"))
-        if file_type != "output" or subfolder.replace("\\", "/").strip("/") != "h3_irodori":
-            raise ValueError("Unexpected Irodori output directory")
-        if not basename or basename != _IroPath(basename).name or not basename.lower().endswith(".wav"):
-            raise ValueError("Unexpected Irodori output WAV filename")
-        source_root = _IroPath(folder_paths.get_output_directory()).resolve()
-        source = (source_root / "h3_irodori" / basename).resolve()
-        if not source.is_relative_to(source_root) or not source.is_file():
-            raise FileNotFoundError("Irodori output WAV not found")
-        input_root = _IroPath(folder_paths.get_input_directory()).resolve()
-        
-        
-        raw_name = str(data.get("name", "")).strip()
-        if raw_name.lower().endswith(".wav"):
-            raw_name = raw_name[:-4]
-        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
-        if not safe_name or len(safe_name) > 80:
-            raise ValueError("保存名は1〜80文字で入力してください。")
-        if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", safe_name, re.IGNORECASE):
-            raise ValueError("Windowsの予約名は使えません。")
-        dest_dir = input_root / "h3_irodori"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        
-        for number in range(1, 10000):
-            suffix = "" if number == 1 else f"_{number}"
-            dest = dest_dir / f"{safe_name}{suffix}.wav"
-            try:
-                with dest.open("xb") as output_f:
-                    try:
-                        with source.open("rb") as input_f:
-                            _iro_shutil.copyfileobj(input_f, output_f)
-                    except Exception:
-                        output_f.close()
-                        dest.unlink(missing_ok=True)
-                        raise
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise ValueError("同名ファイルが多すぎます。別の名前を指定してください。")
-        return web.json_response({"success": True, "input_name": "h3_irodori/" + dest.name})
+        source = _iro_output_wav(data)
+
+        def copy_take(out):
+            with source.open("rb") as input_f:
+                _iro_shutil.copyfileobj(input_f, out)
+
+        input_name = await asyncio.to_thread(_iro_write_input_wav, data.get("name", ""), copy_take)
+        return web.json_response({"success": True, "input_name": input_name})
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=400)
+
+
+@PromptServer.instance.routes.post("/h3/irodori/concat")
+async def h3_irodori_concat(request):
+    try:
+        data = await request.json()
+        result = await asyncio.to_thread(_iro_concat_takes, data.get("takes"), data.get("name", ""),
+                                         data.get("gap_seconds", 0.3))
+        return web.json_response(result)
     except Exception as exc:
         return web.json_response({"success": False, "error": str(exc)}, status=400)
 
