@@ -1,6 +1,47 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+
+const h3DialoguePattern = () => /\[H3D1:[A-Za-z0-9_-]+\]/g;
+const h3DialogueAnchor = () => /H3POSEDSPEECH[1-9][0-9]*END/g;
+
+function h3EncodeDialogue(dialogue) {
+    const bytes = new TextEncoder().encode(JSON.stringify(dialogue));
+    const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join("");
+    return "[H3D1:" + btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") + "]";
+}
+
+function h3DecodeDialogue(token) {
+    try {
+        const binary = atob(token.slice(6, -1).replace(/-/g, "+").replace(/_/g, "/"));
+        const data = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, ch => ch.charCodeAt(0))));
+        if (data && [1, 2, 3, 4, 5].includes(data.speaker) && typeof data.text === "string" && data.text.trim()) return data;
+    } catch (_) { /* Unknown or damaged saved dialogue. */ }
+    return null;
+}
+
+function h3ProtectDialogue(value) {
+    const tokens = [];
+    const text = value.replace(h3DialoguePattern(), token => `H3POSEDSPEECH${tokens.push(token)}END`);
+    return { text, tokens };
+}
+
+function h3RestoreDialogue(text, tokens) {
+    const expected = tokens.map((_, i) => `H3POSEDSPEECH${i + 1}END`);
+    if (JSON.stringify(text.match(h3DialogueAnchor()) || []) !== JSON.stringify(expected)) {
+        throw new Error("セリフの位置を修正案から復元できませんでした。");
+    }
+    let index = 0;
+    return text.replace(h3DialogueAnchor(), () => tokens[index++]);
+}
+
+function h3ReadableShot(value) {
+    return String(value || "").replace(h3DialoguePattern(), token => {
+        const dialogue = h3DecodeDialogue(token);
+        return dialogue ? `<Subject ${dialogue.speaker}>「${dialogue.text}」` : "";
+    });
+}
+
 function h3ParseClipSettings(value) {
     try {
         const parsed = typeof value === "string" ? JSON.parse(value || "{}") : value;
@@ -381,49 +422,6 @@ function installStudioStyles() {
             pointer-events: none;
         }
 
-        .h3-dialogue-block {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .h3-dialogue-label {
-            font-size: 10px;
-            color: #9aa0a6;
-            font-weight: bold;
-        }
-        .h3-speaker-bar {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .h3-speaker-chip {
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 4px;
-            background: #181818;
-            border: 1px solid #333333;
-            border-radius: 6px;
-            padding: 4px 0;
-            cursor: pointer;
-            font-size: 10px;
-            font-weight: 600;
-            color: #8b949e;
-            user-select: none;
-            transition: all 0.12s;
-        }
-        .h3-speaker-chip:hover {
-            border-color: #555555;
-            color: #ffffff;
-        }
-        .h3-speaker-chip.active {
-            background: #007acc;
-            border-color: #5bb3f5;
-            color: #ffffff;
-            font-weight: bold;
-        }
-
         .h3-tab-content {
             padding: 10px;
             display: flex;
@@ -612,6 +610,69 @@ function installStudioStyles() {
             font-weight: bold;
         }
 
+
+        .h3-shot-editor {
+            min-height: 84px;
+            padding: 8px;
+            border: 1px solid #383838;
+            border-radius: 8px;
+            background: #202020;
+            color: #fff;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            cursor: text;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .h3-shot-editor:focus { outline: 1px solid #80afd9; }
+        .h3-shot-editor:empty::before {
+            content: attr(data-placeholder);
+            color: #aab0b9;
+            pointer-events: none;
+        }
+        .h3-inline-dialogue {
+            display: inline-block;
+            max-width: 95%;
+            padding: 1px 6px;
+            margin: 0 2px;
+            border: 1px solid #587999;
+            border-radius: 5px;
+            background: #25415a;
+            color: #eaf5ff;
+            font: inherit;
+            line-height: 1.4;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            vertical-align: text-bottom;
+            cursor: pointer;
+        }
+        .h3-dialogue-modal {
+            width: min(420px, calc(100vw - 40px));
+            padding: 16px;
+            border: 1px solid #575c63;
+            border-radius: 10px;
+            background: #202226;
+            color: #edf1f6;
+        }
+        .h3-dialogue-modal::backdrop { background: #0009; }
+        .h3-dialogue-modal form, .h3-dialogue-modal label {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .h3-dialogue-modal form { gap: 12px; }
+        .h3-dialogue-modal h3 { margin: 0; }
+        .h3-dialogue-modal select, .h3-dialogue-modal textarea, .h3-dialogue-modal button {
+            padding: 7px;
+            border: 1px solid #575c63;
+            border-radius: 5px;
+            background: #30343a;
+            color: inherit;
+            font: inherit;
+        }
+        .h3-dialogue-controls { display: flex; gap: 6px; justify-content: flex-end; }
+        .h3-dialogue-controls button[type="submit"] { background: #265784; }
         .h3-btn-gen-prompt {
             background: #007acc;
             border: 1px solid rgba(255, 255, 255, 0.2);
@@ -1131,12 +1192,9 @@ app.registerExtension({
                 }
 
                 let autoState = {
-                    enabled: false,
                     directorMode: "detailed",
                     overwrite: false,
-                    noClips: false,
                     duration: 5,
-                    clipCount: 1,
                     story: ""
                 };
                 try {
@@ -1692,142 +1750,319 @@ app.registerExtension({
                     return wrapper;
                 };
 
-                const createQuickTagButtons = (actionRow, prefix) => {
-                    const bar = document.createElement("div");
-                    bar.className = "h3-tag-btn-bar";
-                    const ta = actionRow.querySelector("textarea");
-                    const w = wMap[`${prefix}_action`];
-                    let savedStart = ta?.value.length || 0;
-                    let savedEnd = savedStart;
-                    let composing = false;
-                    const rememberCaret = () => {
-                        if (ta && typeof ta.selectionStart === "number") {
-                            savedStart = ta.selectionStart;
-                            savedEnd = ta.selectionEnd;
-                        }
+                const openDialogueModal = (initial, onApply, onDelete) => {
+                    const speakers = [];
+                    for (let slot = 1; slot <= 5; slot++) {
+                        const definition = String(wMap[`subject_def_${slot}`]?.value || "").trim();
+                        const isCharacter = !!charEnabledState[slot];
+                        if (!isCharacter && !(definition && wMap[`subject_kind_${slot}`]?.value === "人物")) continue;
+                        const preset = String(wMap[`char${slot}_preset`]?.value || "");
+                        const name = isCharacter
+                            ? String(wMap[`char${slot}_name`]?.value || "").trim()
+                                || (["None", "Custom Text"].includes(preset) ? "" : preset)
+                            : definition.split("\n")[0].slice(0, 28);
+                        speakers.push([String(slot), name || `キャラクター ${slot}`]);
+                    }
+                    const modal = document.createElement("dialog");
+                    modal.className = "h3-dialogue-modal";
+                    const form = document.createElement("form");
+                    const heading = document.createElement("h3");
+                    heading.textContent = initial ? "セリフを編集" : "セリフを挿入";
+                    form.appendChild(heading);
+                    const field = (label, el) => {
+                        const row = document.createElement("label");
+                        row.append(document.createTextNode(label), el);
+                        form.appendChild(row);
                     };
-                    if (ta) {
-                        ta.addEventListener("click", rememberCaret);
-                        ta.addEventListener("keyup", rememberCaret);
-                        ta.addEventListener("select", rememberCaret);
-                        ta.addEventListener("blur", rememberCaret);
-                        ta.addEventListener("compositionstart", () => { composing = true; });
-                        ta.addEventListener("compositionend", () => { composing = false; rememberCaret(); });
-                    }
-                    const insertTag = (tag) => {
-                        if (!ta || composing) return;
-                        const start = document.activeElement === ta ? ta.selectionStart : savedStart;
-                        const end = document.activeElement === ta ? ta.selectionEnd : savedEnd;
-                        const a = Math.max(0, Math.min(start ?? ta.value.length, ta.value.length));
-                        const b = Math.max(a, Math.min(end ?? a, ta.value.length));
-                        ta.value = ta.value.slice(0, a) + tag + ta.value.slice(b);
-                        const pos = a + tag.length;
-                        ta.focus();
-                        ta.setSelectionRange(pos, pos);
-                        savedStart = savedEnd = pos;
-                        ta.dispatchEvent(new Event("input", { bubbles: true }));
+                    const addOptions = (select, choices) => {
+                        for (const [value, label] of choices) select.add(new Option(label, value));
                     };
-                    for (let s = 1; s <= 5; s++) {
-                        const btn = document.createElement("button");
-                        btn.type = "button";
-                        btn.className = "h3-tag-btn";
-                        btn.textContent = `S${s}`;
-                        btn.title = `<Subject ${s}> をカーソル位置に挿入`;
-                        btn.addEventListener("mousedown", e => e.preventDefault());
-                        btn.onclick = e => { e.preventDefault(); e.stopPropagation(); insertTag(`<Subject ${s}>`); };
-                        bar.appendChild(btn);
+                    const speaker = document.createElement("select");
+                    if (initial && !speakers.some(([value]) => value === String(initial.speaker))) {
+                        speaker.add(new Option(`キャラクター ${initial.speaker}（現在の設定にありません）`, initial.speaker));
                     }
-                    for (let a = 1; a <= 3; a++) {
-                        const btn = document.createElement("button");
-                        btn.type = "button";
-                        btn.className = "h3-tag-btn audio-tag";
-                        btn.textContent = `A${a}`;
-                        btn.title = `<Audio ${a}> をカーソル位置に挿入`;
-                        btn.addEventListener("mousedown", e => e.preventDefault());
-                        btn.onclick = e => { e.preventDefault(); e.stopPropagation(); insertTag(`<Audio ${a}>`); };
-                        bar.appendChild(btn);
+                    addOptions(speaker, speakers);
+                    if (initial) speaker.value = String(initial.speaker);
+                    field("話者", speaker);
+                    const audio = document.createElement("select");
+                    const updateAudioChoices = () => {
+                        const current = audio.value;
+                        const slot = speaker.value;
+                        const source = charEnabledState[slot] ? wMap[`char${slot}_audio`]?.value : wMap[`subject_audio_${slot}`]?.value;
+                        const inherited = String(source || "").match(/<Audio\s+([1-3])>/i);
+                        audio.replaceChildren();
+                        addOptions(audio, [["inherit", `話者の設定に従う（${inherited ? "A" + inherited[1] : "参照なし"}）`],
+                            ["0", "参照なし"], ["1", "A1"], ["2", "A2"], ["3", "A3"]]);
+                        audio.value = current || "inherit";
+                    };
+                    updateAudioChoices();
+                    audio.value = initial?.audio == null ? "inherit" : String(initial.audio);
+                    speaker.onchange = updateAudioChoices;
+                    if (isReferenceMode()) {
+                        field("音声リファレンス", audio);
                     }
+                    const line = document.createElement("textarea");
+                    line.rows = 3;
+                    line.required = true;
+                    line.value = initial?.text || "";
+                    line.placeholder = "例：雨が降りそうだな……";
+                    field("セリフ", line);
 
-                    const convertBtn = document.createElement("button");
-                    convertBtn.type = "button";
-                    convertBtn.className = "h3-tag-btn";
-                    convertBtn.textContent = "コード変換";
-                    convertBtn.title = "定義した名前を <Subject X> に置換（完全一致のみ）";
-                    convertBtn.style.marginLeft = "auto";
-                    convertBtn.addEventListener("mousedown", e => e.preventDefault());
-                    convertBtn.onclick = e => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (!composing) convertSubjectNamesInTextarea(ta);
+                    const controls = document.createElement("div");
+                    controls.className = "h3-dialogue-controls";
+                    const button = (title, handler) => {
+                        const el = document.createElement("button");
+                        el.type = handler ? "button" : "submit";
+                        el.textContent = title;
+                        if (handler) el.onclick = handler;
+                        controls.appendChild(el);
+                        return el;
                     };
-                    bar.appendChild(convertBtn);
-                    return bar;
+                    if (onDelete) button("削除", () => { modal.close(); onDelete(); });
+                    button("キャンセル", () => modal.close());
+                    const apply = button("適用");
+                    if (!speaker.options.length) {
+                        const hint = document.createElement("p");
+                        hint.textContent = "［キャラクター設定］か［演出］で人物を定義してください。";
+                        form.appendChild(hint);
+                        apply.disabled = true;
+                    }
+                    form.appendChild(controls);
+                    form.onsubmit = event => {
+                        event.preventDefault();
+                        const text = line.value.trim();
+                        if (!text || !speaker.value) return;
+                        let audioSlot = audio.value === "inherit" ? null : Number(audio.value);
+                        if (!isReferenceMode()) audioSlot = initial?.audio ?? null;
+                        modal.close();
+                        onApply({ speaker: Number(speaker.value), audio: audioSlot, text });
+                    };
+                    modal.addEventListener("close", () => modal.remove(), { once: true });
+                    modal.addEventListener("keydown", event => event.stopPropagation());
+                    modal.appendChild(form);
+                    document.body.appendChild(modal);
+                    modal.showModal();
+                    (initial ? line : speaker).focus();
                 };
 
-                const createDialogueWithSpeaker = (prefix, defaultSpeaker) => {
-                    const block = document.createElement("div");
-                    block.className = "h3-dialogue-block";
-
-                    const lbl = document.createElement("div");
-                    lbl.className = "h3-dialogue-label";
-                    lbl.textContent = "セリフ";
-                    block.appendChild(lbl);
-
+                const createShotEditor = (prefix) => {
+                    const actionWidget = wMap[`${prefix}_action`];
+                    const legacy = wMap[`${prefix}_dialogue`];
+                    const legacySpeaker = wMap[`${prefix}_speaker`];
+                    const row = document.createElement("div");
+                    row.className = "h3-field-row";
+                    const label = document.createElement("label");
+                    label.textContent = "アクション / 構図";
                     const bar = document.createElement("div");
-                    bar.className = "h3-speaker-bar";
-
-                    const spkWidget = wMap[`${prefix}_speaker`];
-                    const options = [
-                        { label: "なし", value: "None" },
-                        { label: "キャラ1 (S1)", value: "S1" },
-                        { label: "キャラ2 (S2)", value: "S2" },
-                        { label: "キャラ3 (S3)", value: "S3" },
-                        { label: "キャラ4 (S4)", value: "S4" },
-                        { label: "キャラ5 (S5)", value: "S5" }
-                    ];
-
-                    const chips = [];
-                    const curVal = spkWidget && spkWidget.value !== undefined ? spkWidget.value : defaultSpeaker;
-
-                    options.forEach(opt => {
-                        const chip = document.createElement("div");
-                        chip.className = `h3-speaker-chip ${curVal === opt.value ? "active" : ""}`;
-                        chip.textContent = opt.label;
-
-                        chip.onclick = () => {
-                            chips.forEach(c => c.classList.remove("active"));
-                            chip.classList.add("active");
-                            if (spkWidget) {
-                                spkWidget.value = opt.value;
-                                if (spkWidget.callback) spkWidget.callback(opt.value);
-                            }
-                        };
-                        chips.push(chip);
-                        bar.appendChild(chip);
-                    });
-                    block.appendChild(bar);
-
-                    const diaWidget = wMap[`${prefix}_dialogue`];
-                    const ta = document.createElement("textarea");
-                    ta.style.background = "#202020";
-                    ta.style.color = "#ffffff";
-                    ta.style.border = "1px solid #383838";
-                    ta.style.padding = "8px";
-                    ta.style.borderRadius = "8px";
-                    ta.style.minHeight = "64px";
-                    ta.style.outline = "none";
-                    ta.placeholder = "セリフのみを入力 (話者は上のボタンで選択)";
-                    ta.value = diaWidget && diaWidget.value !== undefined ? diaWidget.value : "";
-                    ta.oninput = () => {
-                        if (diaWidget) {
-                            diaWidget.value = ta.value;
-                            if (diaWidget.callback) diaWidget.callback(ta.value);
+                    bar.className = "h3-tag-btn-bar";
+                    const editor = document.createElement("div");
+                    editor.className = "h3-shot-editor";
+                    editor.contentEditable = "true";
+                    editor.setAttribute("role", "textbox");
+                    editor.setAttribute("aria-label", label.textContent);
+                    editor.setAttribute("aria-multiline", "true");
+                    editor.dataset.placeholder = "ショットの動作やカメラワークを入力";
+                    row.append(label, bar, editor);
+                    let savedRange = null;
+                    let composing = false;
+                    const write = (widget, value) => {
+                        if (!widget || widget.value === value) return;
+                        widget.value = value;
+                        widget.callback?.(value);
+                    };
+                    const createChip = (encoded) => {
+                        const dialogue = h3DecodeDialogue(encoded);
+                        if (!dialogue) return document.createTextNode(encoded);
+                        const chip = document.createElement("button");
+                        chip.type = "button";
+                        chip.className = "h3-inline-dialogue";
+                        chip.contentEditable = "false";
+                        chip.dataset.h3Dialogue = encoded;
+                        const slot = dialogue.speaker;
+                        const name = String(wMap[`char${slot}_name`]?.value || "").trim() || `S${slot}`;
+                        const preview = Array.from(dialogue.text.replace(/\s+/g, " ")).slice(0, 18).join("");
+                        chip.textContent = `💬 ${name}「${preview}${preview.length < dialogue.text.length ? "…" : ""}」`;
+                        chip.title = dialogue.text;
+                        return chip;
+                    };
+                    const asFragment = (value) => {
+                        const fragment = document.createDocumentFragment();
+                        let start = 0;
+                        for (const match of String(value).matchAll(h3DialoguePattern())) {
+                            fragment.append(document.createTextNode(value.slice(start, match.index)), createChip(match[0]));
+                            start = match.index + match[0].length;
+                        }
+                        fragment.append(document.createTextNode(value.slice(start)));
+                        return fragment;
+                    };
+                    const serialize = (node, readable = false) => {
+                        const box = document.createElement("div");
+                        box.style.cssText = "position:fixed;left:-100000px;white-space:pre-wrap;pointer-events:none;";
+                        box.append(node);
+                        for (const chip of box.querySelectorAll("[data-h3-dialogue]")) {
+                            chip.replaceWith(document.createTextNode(readable ? chip.textContent : chip.dataset.h3Dialogue));
+                        }
+                        document.body.appendChild(box);
+                        const value = box.innerText;
+                        box.remove();
+                        return value.replace(/\u00a0/g, " ");
+                    };
+                    const value = () => {
+                        const copy = editor.cloneNode(true);
+                        copy.className = "";
+                        copy.removeAttribute("contenteditable");
+                        return serialize(copy);
+                    };
+                    const save = () => write(actionWidget, value());
+                    const remember = () => {
+                        const selection = window.getSelection();
+                        if (selection?.rangeCount && editor.contains(selection.getRangeAt(0).commonAncestorContainer)) {
+                            savedRange = selection.getRangeAt(0).cloneRange();
                         }
                     };
-                    ta.onfocus = () => { lastFocusedInput = ta; };
-                    block.appendChild(ta);
-
-                    return block;
+                    const getRange = () => {
+                        if (savedRange && editor.contains(savedRange.commonAncestorContainer)) return savedRange.cloneRange();
+                        const range = document.createRange();
+                        range.selectNodeContents(editor);
+                        range.collapse(false);
+                        return range;
+                    };
+                    const replaceAtRange = (range, fragment) => {
+                        editor.focus();
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        const container = document.createElement("div");
+                        container.append(fragment);
+                        if (!document.execCommand(container.hasChildNodes() ? "insertHTML" : "delete", false, container.innerHTML)) {
+                            range.deleteContents();
+                            range.insertNode(container.ownerDocument.createRange().createContextualFragment(container.innerHTML));
+                            range.collapse(false);
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                        }
+                        save();
+                        remember();
+                    };
+                    const insertDialogue = (range, dialogue) => {
+                        const fragment = document.createDocumentFragment();
+                        fragment.appendChild(createChip(h3EncodeDialogue(dialogue)));
+                        replaceAtRange(range, fragment);
+                    };
+                    const original = String(actionWidget?.value || "");
+                    const prior = String(legacy?.value || "").trim();
+                    const priorSpeaker = String(legacySpeaker?.value || "").match(/^S([1-5])$/i);
+                    const oldLines = priorSpeaker && !original.match(h3DialoguePattern()) ? prior.split(/\r?\n/)
+                        .map(line => line.replace(/^(?:S[1-5]|<Subject\s+[1-5]>(?:\s+says)?)\s*:\s*/i, "")
+                            .replace(/^(?:<d>|\[d\])?\s*(?:\[Japanese\])?\s*/i, "")
+                            .replace(/\s*(?:<\/d>|\[\/d\])?\s*$/i, "").trim().replace(/^["']|["']$/g, ""))
+                        .filter(Boolean) : [];
+                    const starter = oldLines.length ? [original, ...oldLines.map(text => h3EncodeDialogue({
+                        speaker: Number(priorSpeaker[1]), audio: null, text
+                    }))].filter(Boolean).join("\n") : original;
+                    editor.appendChild(asFragment(starter));
+                    const sync = () => {
+                        save();
+                        if (oldLines.length) {
+                            write(legacy, "");
+                            write(legacySpeaker, "None");
+                        }
+                        remember();
+                    };
+                    editor.addEventListener("input", sync);
+                    for (const type of ["click", "keyup", "focusout", "mouseup"]) editor.addEventListener(type, remember);
+                    editor.addEventListener("keydown", event => event.stopPropagation());
+                    editor.addEventListener("compositionstart", () => { composing = true; });
+                    editor.addEventListener("compositionend", () => { composing = false; sync(); });
+                    editor.addEventListener("click", event => {
+                        const chip = event.target.closest("[data-h3-dialogue]");
+                        if (!chip) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const edit = document.createRange();
+                        edit.selectNode(chip);
+                        openDialogueModal(h3DecodeDialogue(chip.dataset.h3Dialogue), dialogue => {
+                            replaceAtRange(edit, asFragment(h3EncodeDialogue(dialogue)));
+                            sync();
+                        }, () => {
+                            replaceAtRange(edit, document.createDocumentFragment());
+                            sync();
+                        });
+                    });
+                    editor.addEventListener("dragover", event => event.preventDefault());
+                    editor.addEventListener("drop", event => event.preventDefault());
+                    editor.addEventListener("paste", event => {
+                        if (!event.clipboardData) return;
+                        event.preventDefault();
+                        remember();
+                        const rich = event.clipboardData.getData("application/x-h3-shot");
+                        const content = rich ? asFragment(rich)
+                            : document.createTextNode(event.clipboardData.getData("text/plain"));
+                        const fragment = document.createDocumentFragment();
+                        fragment.append(content);
+                        replaceAtRange(getRange(), fragment);
+                        sync();
+                    });
+                    for (const type of ["copy", "cut"]) {
+                        editor.addEventListener(type, event => {
+                            remember();
+                            const range = getRange();
+                            if (!event.clipboardData || range.collapsed) return;
+                            event.preventDefault();
+                            event.clipboardData.setData("application/x-h3-shot", serialize(range.cloneContents()));
+                            event.clipboardData.setData("text/plain", serialize(range.cloneContents(), true));
+                            if (type === "cut") {
+                                replaceAtRange(range, document.createDocumentFragment());
+                                sync();
+                            }
+                        });
+                    }
+                    const toolButton = (title, hint, handler, audio = false) => {
+                        const btn = document.createElement("button");
+                        btn.type = "button";
+                        btn.className = "h3-tag-btn" + (audio ? " audio-tag" : "");
+                        btn.textContent = title;
+                        btn.title = hint;
+                        btn.onmousedown = event => { remember(); event.preventDefault(); };
+                        btn.onclick = event => {
+                            event.stopPropagation();
+                            if (!composing) handler(getRange());
+                        };
+                        bar.appendChild(btn);
+                        return btn;
+                    };
+                    for (const [tag, count, code] of [["Subject", 5, "S"], ["Audio", 3, "A"]]) {
+                        for (let n = 1; n <= count; n++) {
+                            const text = `<${tag} ${n}>`;
+                            toolButton(`${code}${n}`, `${text} をカーソル位置に挿入`, range => {
+                                const fragment = document.createDocumentFragment();
+                                fragment.append(document.createTextNode(text));
+                                replaceAtRange(range, fragment);
+                                sync();
+                            }, code === "A");
+                        }
+                    }
+                    toolButton("セリフ", "カーソル位置にセリフを挿入", range => {
+                        openDialogueModal(null, dialogue => { insertDialogue(range, dialogue); sync(); });
+                    });
+                    const convert = toolButton("コード変換", "定義した名前をSubjectタグに変換", async () => {
+                        const source = value();
+                        const anchors = h3ProtectDialogue(source);
+                        try {
+                            const translated = await directorConvert(anchors.text);
+                            if (value() !== source) return;
+                            const restored = h3RestoreDialogue(translated, anchors.tokens);
+                            if (restored === source) return;
+                            const range = document.createRange();
+                            range.selectNodeContents(editor);
+                            replaceAtRange(range, asFragment(restored));
+                            sync();
+                        } catch (e) {
+                            alert(e.message);
+                        }
+                    });
+                    convert.style.marginLeft = "auto";
+                    return row;
                 };
 
                 const createPicCheckboxGroup = (charIndex) => {
@@ -2112,10 +2347,16 @@ app.registerExtension({
                                 throw Error('指定したショットが無効です。タイムラインで有効にしてください。');
                             }
                             const res=await directorRequest('/h3/interactive_base_revise',{
-                                shots:before,target:target.value,instruction:ta.value,
+                                shots:before.map(s => ({...s, action:h3ProtectDialogue(s.action).text})),target:target.value,instruction:ta.value,
                                 names:getDirectorNames(),overall_story:String(wMap.overall_story?.value||'')});
                             const changes=[];
-                            for(const c of res.changes){changes.push({...c,value:c.field==='action'?await directorConvert(c.value):c.value});}
+                            for (const change of res.changes) {
+                                if (change.field === 'action') {
+                                    const anchors = h3ProtectDialogue(before[change.shot - 1].action);
+                                    change.value = h3RestoreDialogue(await directorConvert(change.value), anchors.tokens);
+                                }
+                                changes.push(change);
+                            }
                             pendingDirectorPatch={before,changes,warning:res.warning||''};
                             showPreview();
                         }catch(e){alert('AI部分修正エラー: '+e.message);}
@@ -2137,7 +2378,7 @@ app.registerExtension({
                         preview.appendChild(directorElement('div','変更前 → 変更後（承認するまでタイムラインは変わりません）'));
                         if (pendingDirectorPatch.warning) preview.appendChild(directorElement('div',`注意：${pendingDirectorPatch.warning}`,'h3-guided-intro'));
                         for(const c of pendingDirectorPatch.changes){
-                            const n=directorElement('div',`ショット${c.shot} / ${c.field}\n【変更前】${pendingDirectorPatch.before[c.shot-1][c.field]}\n【変更後】${c.value}`);
+                            const n=directorElement('div',`ショット${c.shot} / ${c.field}\n【変更前】${h3ReadableShot(pendingDirectorPatch.before[c.shot-1][c.field])}\n【変更後】${h3ReadableShot(c.value)}`);
                             n.style.cssText='background:#1b1d22;border:1px solid #444;padding:8px;border-radius:6px;font-size:11px;';preview.appendChild(n);
                         }
                         const row=directorElement('div');row.style.cssText='display:flex;gap:6px;';
@@ -2300,11 +2541,9 @@ app.registerExtension({
                             title.textContent = `ショット ${i}`;
 
                             const timeRow = createTimePicker(`shot${i}`, i===1 ? 3 : i*3);
-                            const actionRow = bindInput(`shot${i}_action`, "アクション / 構図", true, `ショット${i}_アクション/構図`);
-                            const tagBar = createQuickTagButtons(actionRow, `shot${i}`);
-                            const diaBlock = createDialogueWithSpeaker(`shot${i}`, i===1 ? "S1" : "None");
+                            const actionRow = createShotEditor(`shot${i}`);
 
-                            card.append(title, timeRow, tagBar, actionRow, diaBlock);
+                            card.append(title, timeRow, actionRow);
                             makeCollapsible(card, `timeline-shot-${i}`);
                             contentArea.appendChild(card);
                             shotCards[i] = card;
@@ -2545,7 +2784,9 @@ app.registerExtension({
                         };
                         linkLabel.append(linkChk, document.createTextNode("今回の動画を次に繋げる"));
 
-                        titleBar.append(title, lockLabel, enLabel, contLabel, linkLabel);
+                        titleBar.append(title, lockLabel, enLabel);
+                        if (!isReferenceMode()) titleBar.appendChild(contLabel);
+                        titleBar.appendChild(linkLabel);
                         activeClipCard.appendChild(titleBar);
 
                         const editorContainer = document.createElement("div");
@@ -2607,11 +2848,9 @@ app.registerExtension({
                             cardTitle.textContent = `ショット ${j}`;
 
                             const timeRow = createTimePicker(`c${activeClipTab}_s${j}`, j===1 ? 3 : j*3);
-                            const actionRow = bindInput(`c${activeClipTab}_s${j}_action`, "アクション / 構図", true, `ショット${j}_アクション/構図`);
-                            const tagBar = createQuickTagButtons(actionRow, `c${activeClipTab}_s${j}`);
-                            const diaBlock = createDialogueWithSpeaker(`c${activeClipTab}_s${j}`, j===1 ? "S1" : "None");
+                            const actionRow = createShotEditor(`c${activeClipTab}_s${j}`);
 
-                            card.append(cardTitle, timeRow, tagBar, actionRow, diaBlock);
+                            card.append(cardTitle, timeRow, actionRow);
                             makeCollapsible(card, `clip-${activeClipTab}-shot-${j}`);
                             editorContainer.appendChild(card);
                         }
@@ -2662,7 +2901,7 @@ app.registerExtension({
                         
                         const execBtn = document.createElement("button");
                         execBtn.className = "h3-btn-gen-prompt";
-                        execBtn.innerHTML = `<span>▶ おまかせシナリオを考案して各タブに適用</span>`;
+                        execBtn.innerHTML = `<span>▶ ベースのシナリオを考案してタイムラインに適用</span>`;
                         
                         const warn = document.createElement("div");
                         warn.style.fontSize = "9px";
@@ -2687,7 +2926,7 @@ app.registerExtension({
                             bulkStatus.textContent = "";
                             saveAutoState();
                         };
-                        lblOw.append(chkOw, document.createTextNode("現在の入力内容を上書きすることを許可する (必須)"));
+                        lblOw.append(chkOw, document.createTextNode("タイムラインのショットを上書きする (必須)"));
 
                         const bulkStatus = document.createElement("div");
                         bulkStatus.style.cssText = "font-size:10px;line-height:1.5;color:#aeb7c2;min-height:15px;white-space:pre-wrap;";
@@ -2697,67 +2936,16 @@ app.registerExtension({
                         const autoCard3 = document.createElement("div");
                         autoCard3.className = "h3-char-card";
                         
-                        const ccTitleBar = document.createElement("div");
-                        ccTitleBar.style.display = "flex";
-                        ccTitleBar.style.justifyContent = "space-between";
-                        ccTitleBar.style.alignItems = "center";
-                        
-                        const ccTitle = document.createElement("div");
-                        ccTitle.className = "h3-char-title";
-                        ccTitle.textContent = "クリップ数の指定 (1〜10)";
-                        
-                        const lblNoClip = document.createElement("label");
-                        lblNoClip.style.fontSize = "11px";
-                        lblNoClip.style.color = "#dbe0e6";
-                        lblNoClip.style.display = "flex";
-                        lblNoClip.style.alignItems = "center";
-                        lblNoClip.style.gap = "6px";
-                        lblNoClip.style.cursor = "pointer";
-                        const chkNoClip = document.createElement("input");
-                        chkNoClip.type = "checkbox";
-                        chkNoClip.checked = autoState.noClips;
-                        chkNoClip.onchange = () => {
-                            autoState.noClips = chkNoClip.checked;
-                            saveAutoState();
-                            renderTabContent();
-                        };
-                        lblNoClip.append(chkNoClip, document.createTextNode("クリップ生成をしない（ベース生成のみ）"));
-                        
-                        ccTitleBar.append(ccTitle, lblNoClip);
-                        
-                        const ccGrid = document.createElement("div");
-                        ccGrid.className = "h3-pic-check-grid";
-                        ccGrid.style.gridTemplateColumns = "repeat(10, 1fr)";
-                        if (autoState.noClips) {
-                            ccGrid.style.opacity = "0.3";
-                            ccGrid.style.pointerEvents = "none";
-                        }
-                        
-                        for(let i=1; i<=10; i++) {
-                            const cbtn = document.createElement("div");
-                            const isChecked = (autoState.clipCount === i);
-                            cbtn.className = `h3-pic-check-item ${isChecked ? "checked" : ""}`;
-                            cbtn.textContent = i;
-                            cbtn.onclick = () => {
-                                if (autoState.noClips) return;
-                                autoState.clipCount = i;
-                                saveAutoState();
-                                renderTabContent();
-                            };
-                            ccGrid.appendChild(cbtn);
-                        }
-
                         const durationRow = document.createElement("div");
                         durationRow.style.display = "flex";
                         durationRow.style.alignItems = "center";
                         durationRow.style.gap = "8px";
-                        durationRow.style.marginTop = "12px";
 
                         const durLabel = document.createElement("div");
                         durLabel.style.fontSize = "11px";
                         durLabel.style.fontWeight = "bold";
                         durLabel.style.color = "#ffffff";
-                        durLabel.textContent = "1生成あたりの動画の長さの目安:";
+                        durLabel.textContent = "ベース動画の長さの目安";
 
                         const durInput = document.createElement("input");
                         durInput.type = "number";
@@ -2787,7 +2975,7 @@ app.registerExtension({
 
                         durationRow.append(durLabel, durInput, durUnit);
                         
-                        autoCard3.append(ccTitleBar, ccGrid, durationRow);
+                        autoCard3.appendChild(durationRow);
 
                         const autoCard4 = document.createElement("div");
                         autoCard4.className = "h3-char-card";
@@ -2810,7 +2998,7 @@ app.registerExtension({
 
                         execBtn.onclick = async () => {
                             if (!autoState.overwrite) {
-                                bulkStatus.textContent = "先に『現在の入力内容を上書きすることを許可する』にチェックしてください。";
+                                bulkStatus.textContent = "先に『タイムラインのショットを上書きする』にチェックしてください。";
                                 bulkStatus.style.color = "#ff9b9b";
                                 chkOw.focus();
                                 return;
@@ -2828,7 +3016,7 @@ app.registerExtension({
                             saveAutoState();
                             const payload = {};
                             (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
-                            payload.auto_data = JSON.stringify(autoState);
+                            payload.auto_data = JSON.stringify({story: autoState.story, duration: autoState.duration});
                             const controller = new AbortController();
                             const timeoutId = setTimeout(() => controller.abort(), 600000);
                             try {
@@ -2839,13 +3027,7 @@ app.registerExtension({
                                 const data = await res.json();
                                 if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
                                 const baseCount = Object.values(data.base_shots || {}).filter(s => s && String(s.action || "").trim()).length;
-                                const clipData = data.clips_data || {};
                                 if (baseCount === 0) throw new Error("ベース動画のショットが0件です。LLM応答を確認してください。");
-                                if (!autoState.noClips) {
-                                    const missing = Array.from({length:autoState.clipCount},(_,k)=>k+1)
-                                        .filter(i => !Object.values(clipData[i] || {}).some(s=>s && String(s.action || "").trim()));
-                                    if (missing.length) throw new Error(`クリップ${missing.join("、")}のショットがありません。`);
-                                }
                                 bulkStatus.textContent = `考案完了：ベース${baseCount}ショット。設定へ反映しています。`;
                                 if (data.base_shots) {
                                     for (let j = 1; j <= 4; j++) {
@@ -2862,34 +3044,7 @@ app.registerExtension({
                                     }
                                 }
                                 
-                                if (autoState.noClips) {
-                                    for(let i=1; i<=10; i++) {
-                                        if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = false; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(false); }
-                                    }
-                                } else {
-                                    for (let i = 1; i <= 10; i++) {
-                                        if (i <= autoState.clipCount && data.clips_data[i]) {
-                                            if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = true; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(true); }
-                                            
-                                            for (let j = 1; j <= 4; j++) {
-                                                const shotData = data.clips_data[i][j];
-                                                if (shotData) {
-                                                    if(wMap[`c${i}_s${j}_enabled`]){ wMap[`c${i}_s${j}_enabled`].value = true; if(wMap[`c${i}_s${j}_enabled`].callback) wMap[`c${i}_s${j}_enabled`].callback(true); }
-                                                    if(wMap[`c${i}_s${j}_time`]){ wMap[`c${i}_s${j}_time`].value = shotData.time; if(wMap[`c${i}_s${j}_time`].callback) wMap[`c${i}_s${j}_time`].callback(shotData.time); }
-                                                    if(wMap[`c${i}_s${j}_action`]){ wMap[`c${i}_s${j}_action`].value = shotData.action; if(wMap[`c${i}_s${j}_action`].callback) wMap[`c${i}_s${j}_action`].callback(shotData.action); }
-                                                    if(wMap[`c${i}_s${j}_dialogue`]){ wMap[`c${i}_s${j}_dialogue`].value = ""; if(wMap[`c${i}_s${j}_dialogue`].callback) wMap[`c${i}_s${j}_dialogue`].callback(""); }
-                                                    if(wMap[`c${i}_s${j}_speaker`]){ wMap[`c${i}_s${j}_speaker`].value = "None"; if(wMap[`c${i}_s${j}_speaker`].callback) wMap[`c${i}_s${j}_speaker`].callback("None"); }
-                                                } else {
-                                                    if(wMap[`c${i}_s${j}_enabled`]){ wMap[`c${i}_s${j}_enabled`].value = false; if(wMap[`c${i}_s${j}_enabled`].callback) wMap[`c${i}_s${j}_enabled`].callback(false); }
-                                                }
-                                            }
-                                        } else {
-                                            if(wMap[`c${i}_enabled`]){ wMap[`c${i}_enabled`].value = false; if(wMap[`c${i}_enabled`].callback) wMap[`c${i}_enabled`].callback(false); }
-                                        }
-                                    }
-                                }
-
-                                alert("シナリオが各タブに適用されました！\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
+                                alert("ベースのシナリオをタイムラインに適用しました。\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
                                 
                                 activeTab = "timeline";
                                 Object.values(tabButtons).forEach(b => b.classList.remove("active"));
@@ -2908,7 +3063,7 @@ app.registerExtension({
                             } finally {
                                 clearTimeout(timeoutId);
                                 execBtn.disabled = false;
-                                execBtn.textContent = "▶ おまかせシナリオを考案して各タブに適用";
+                                execBtn.textContent = "▶ ベースのシナリオを考案してタイムラインに適用";
                             }
                         };
 
@@ -2959,28 +3114,27 @@ app.registerExtension({
                         makeRow("モデルを読み込む｜参照先：📁ComfyUI/models/checkpoints", modelSelect);
                         modelSelect.onchange = () => store("model", modelSelect.value);
                         const sources = [["manual", "手動入力"]];
+                        const readSource = sourceId => {
+                            if (sourceId === "manual") return null;
+                            const inline = Array.from(String(wMap[`${sourceId}_action`]?.value || "")
+                                .matchAll(h3DialoguePattern()), match => h3DecodeDialogue(match[0])?.text).filter(Boolean);
+                            return inline.length ? inline.join("\n") : String(wMap[`${sourceId}_dialogue`]?.value || "");
+                        };
                         for (let s = 1; s <= 4; s++) {
-                            const w = wMap[`shot${s}_dialogue`];
-                            if (shotEnabledState[s] && String(w?.value || "").trim()) {
-                                sources.push([`shot${s}`, `演出 ショット${s}｜${String(w.value).slice(0, 42)}`]);
-                            }
+                            const spoken = readSource(`shot${s}`);
+                            if (shotEnabledState[s] && spoken.trim()) sources.push([`shot${s}`, `演出 ショット${s}｜${spoken.slice(0, 42)}`]);
                         }
                         for (let c = 1; c <= 10; c++) {
                             if (!clipEnabledState[c]) continue;
                             for (let s = 1; s <= 4; s++) {
-                                const w = wMap[`c${c}_s${s}_dialogue`];
-                                if (clipShotEnabledState[c][s] && String(w?.value || "").trim()) {
-                                    sources.push([`c${c}_s${s}`, `クリップ${c} ショット${s}｜${String(w.value).slice(0, 34)}`]);
-                                }
+                                const id = `c${c}_s${s}`;
+                                const spoken = readSource(id);
+                                if (clipShotEnabledState[c][s] && spoken.trim()) sources.push([id, `クリップ${c} ショット${s}｜${spoken.slice(0, 34)}`]);
                             }
                         }
                         const selectedSource = sources.some(([id]) => id === settings.source) ? settings.source : (sources[1]?.[0] || "manual");
                         const sourceSelect = makeSelect(selectedSource, sources);
                         makeRow("セリフの取得元", sourceSelect);
-                        const readSource = sourceId => {
-                            if (sourceId === "manual") return null;
-                            return String(wMap[`${sourceId}_dialogue`]?.value || "");
-                        };
                         const textBox = styleControl(document.createElement("textarea"));
                         textBox.rows = 3; textBox.style.resize = "vertical";
                         textBox.placeholder = "Irodoriに読み上げさせるセリフ（H3側と同じ内容がおすすめ）";
@@ -3400,7 +3554,7 @@ app.registerExtension({
                                 }
                                 const source={
                                     overall_story:isReferenceMode() ? String(wMap.overall_story?.value||'') : '',
-                                    shots:directorSnapshot().map((x,i)=>({...x,shot:i+1})).filter(x=>x.enabled),
+                                    shots:directorSnapshot().map((x,i)=>({...x,action:h3ReadableShot(x.action),shot:i+1})).filter(x=>x.enabled),
                                     subjects:sourceSubjects,
                                     quality_control:isReferenceMode() ? String(wMap.quality_control?.value||'') : '',
                                     creative_mode:String(wMap.creative_mode?.value||'オフ'),
@@ -3925,7 +4079,7 @@ app.registerExtension({
                             }
                             if (selected.auto) {
                                 const freshAuto = h3ParseClipSettings(wMap.auto_data?.value);
-                                autoState = {enabled:false,directorMode:"detailed",overwrite:false,noClips:false,duration:5,clipCount:1,story:"",...freshAuto};
+                                autoState = {directorMode:"detailed",overwrite:false,duration:5,story:"",...freshAuto};
                                 if (!autoState.uiCollapsed || typeof autoState.uiCollapsed !== "object" ||
                                     Array.isArray(autoState.uiCollapsed)) autoState.uiCollapsed = {};
                             }
