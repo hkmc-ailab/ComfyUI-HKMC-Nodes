@@ -1269,6 +1269,7 @@ app.registerExtension({
                 };
 
                 let activeTab = "cast";
+                let irodoriAudioBusy = false;
                 let activeClipTab = 1;
                 let lastFocusedInput = null;
                 let isMediaCollapsed = false;
@@ -3114,22 +3115,31 @@ app.registerExtension({
                         makeRow("モデルを読み込む｜参照先：📁ComfyUI/models/checkpoints", modelSelect);
                         modelSelect.onchange = () => store("model", modelSelect.value);
                         const sources = [["manual", "手動入力"]];
-                        const readSource = sourceId => {
-                            if (sourceId === "manual") return null;
-                            const inline = Array.from(String(wMap[`${sourceId}_action`]?.value || "")
-                                .matchAll(h3DialoguePattern()), match => h3DecodeDialogue(match[0])?.text).filter(Boolean);
-                            return inline.length ? inline.join("\n") : String(wMap[`${sourceId}_dialogue`]?.value || "");
+                        const sourceLines = new Map();
+                        const addShotSources = (id, label) => {
+                            const action = String(wMap[`${id}_action`]?.value || "");
+                            const lines = Array.from(action.matchAll(h3DialoguePattern()),
+                                match => h3DecodeDialogue(match[0])).filter(Boolean);
+                            if (!lines.length) {
+                                const speaker = /^S([1-5])$/.exec(String(wMap[`${id}_speaker`]?.value || ""));
+                                const text = String(wMap[`${id}_dialogue`]?.value || "").trim();
+                                if (text) lines.push({ text, speaker: Number(speaker?.[1]) || null });
+                            }
+                            lines.forEach(({ text, speaker, audio }, index) => {
+                                const key = index === 0 ? id : `${id}:${index + 1}`;
+                                const title = `${label}・セリフ${index + 1}`;
+                                sourceLines.set(key, { text, speaker, audio, title });
+                                const tag = speaker ? `｜S${speaker}` : "";
+                                sources.push([key, `${title}${tag}｜${text.replace(/\s+/g, " ").slice(0, 38)}`]);
+                            });
                         };
                         for (let s = 1; s <= 4; s++) {
-                            const spoken = readSource(`shot${s}`);
-                            if (shotEnabledState[s] && spoken.trim()) sources.push([`shot${s}`, `演出 ショット${s}｜${spoken.slice(0, 42)}`]);
+                            if (shotEnabledState[s]) addShotSources(`shot${s}`, `タイムライン ショット${s}`);
                         }
                         for (let c = 1; c <= 10; c++) {
-                            if (!clipEnabledState[c]) continue;
+                            if (!wMap[`c${c}_enabled`]?.value) continue;
                             for (let s = 1; s <= 4; s++) {
-                                const id = `c${c}_s${s}`;
-                                const spoken = readSource(id);
-                                if (clipShotEnabledState[c][s] && spoken.trim()) sources.push([id, `クリップ${c} ショット${s}｜${spoken.slice(0, 34)}`]);
+                                if (clipShotEnabledState[c][s]) addShotSources(`c${c}_s${s}`, `クリップ${c} ショット${s}`);
                             }
                         }
                         const selectedSource = sources.some(([id]) => id === settings.source) ? settings.source : (sources[1]?.[0] || "manual");
@@ -3138,12 +3148,19 @@ app.registerExtension({
                         const textBox = styleControl(document.createElement("textarea"));
                         textBox.rows = 3; textBox.style.resize = "vertical";
                         textBox.placeholder = "Irodoriに読み上げさせるセリフ（H3側と同じ内容がおすすめ）";
-                        textBox.value = readSource(selectedSource) ?? (settings.text || "");
+                        textBox.value = sourceLines.get(selectedSource)?.text ?? (settings.text || "");
                         makeRow("読み上げテキスト", textBox);
                         sourceSelect.onchange = () => {
                             store("source", sourceSelect.value);
-                            const fromSource = readSource(sourceSelect.value);
-                            if (fromSource !== null) textBox.value = fromSource;
+                            const source = sourceLines.get(sourceSelect.value);
+                            if (!source) return;
+                            textBox.value = source.text;
+                            if (source.speaker) {
+                                speakerSelect.value = `S${source.speaker}`;
+                                store("speaker", speakerSelect.value);
+                            }
+                            const audioSlot = source.audio || assignedAudioSlot(speakerSelect.value);
+                            if (audioSlot) targetSlot.value = String(audioSlot - 1);
                         };
                         textBox.oninput = () => {
                             store("text", textBox.value);
@@ -3226,7 +3243,7 @@ app.registerExtension({
                         volumeValue.style.minWidth = "38px";
                         const updateVolume = () => {
                             const v = Math.max(0, Math.min(100, Number(volume.value) || 0));
-                            preview.volume = v / 100;
+                            for (const player of card.querySelectorAll("audio")) player.volume = v / 100;
                             volumeValue.textContent = `${v}%`;
                         };
                         updateVolume();
@@ -3238,7 +3255,7 @@ app.registerExtension({
                         previewPanel.appendChild(saveSection);
                         const saveHeading = document.createElement("div");
                         saveHeading.className = "h3-char-title";
-                        saveHeading.textContent = "気に入ったらスロットへ保存";
+                        saveHeading.textContent = "このテイクを単体で保存";
                         saveSection.appendChild(saveHeading);
                         const nameInput = styleControl(document.createElement("input"));
                         nameInput.type = "text"; nameInput.maxLength = 80;
@@ -3253,10 +3270,23 @@ app.registerExtension({
                         saveSection.appendChild(nameRow);
                         const voiceOptions = [["None", "話者を自動設定しない"]];
                         for (let i = 1; i <= 5; i++) {
-                            voiceOptions.push([`S${i}`, `S${i}：${wMap[`char${i}_name`]?.value || "キャラクター"}`]);
+                            const name = charEnabledState[i] ? wMap[`char${i}_name`]?.value
+                                : String(wMap[`subject_def_${i}`]?.value || "").split("\n", 1)[0].slice(0, 28);
+                            voiceOptions.push([`S${i}`, `S${i}：${name || "キャラクター"}`]);
                         }
-                        const guessSpeaker = () => String(wMap[`${sourceSelect.value}_speaker`]?.value || "None");
-                        const speakerSelect = makeSelect(settings.speaker || guessSpeaker(), voiceOptions);
+                        const speakerNumber = value => Number(/^S([1-5])$/.exec(value)?.[1]) || 0;
+                        const audioWidget = speaker => {
+                            const slot = speakerNumber(speaker);
+                            if (!slot) return null;
+                            if (charEnabledState[slot]) return wMap[`char${slot}_audio`];
+                            if (wMap[`subject_kind_${slot}`]?.value === "人物") return wMap[`subject_audio_${slot}`];
+                            return wMap[`char${slot}_audio`];
+                        };
+                        const assignedAudioSlot = speaker => Number(
+                            /<Audio\s+([1-3])>/i.exec(String(audioWidget(speaker)?.value || ""))?.[1]) || 0;
+                        const initialSource = sourceLines.get(selectedSource);
+                        const initialSpeaker = initialSource?.speaker ? `S${initialSource.speaker}` : settings.speaker || "None";
+                        const speakerSelect = makeSelect(initialSpeaker, voiceOptions);
                         const spRow = document.createElement("div");
                         spRow.className = "h3-field-row";
                         const spLabel = document.createElement("label");
@@ -3264,7 +3294,9 @@ app.registerExtension({
                         spRow.append(spLabel, speakerSelect);
                         saveSection.appendChild(spRow);
                         speakerSelect.onchange = () => store("speaker", speakerSelect.value);
-                        const targetSlot = makeSelect(settings.slot ?? 0, [[0,"A1"],[1,"A2"],[2,"A3"]]);
+                        const audioSlots = [[0, "A1"], [1, "A2"], [2, "A3"]];
+                        const initialAudio = initialSource?.audio || assignedAudioSlot(initialSpeaker);
+                        const targetSlot = makeSelect(settings.slot ?? (initialAudio ? initialAudio - 1 : 0), audioSlots);
                         const slotRow = document.createElement("div");
                         slotRow.className = "h3-field-row";
                         const slotLabel = document.createElement("label");
@@ -3281,11 +3313,16 @@ app.registerExtension({
                         savedStatus.style.cssText = "font-size:12px;color:#aab7c4;white-space:pre-wrap;";
                         saveSection.appendChild(savedStatus);
                         const normalizeTake = take => {
-                            if (!take || typeof take !== "object") return null;
-                            if (take.type !== "output" || take.subfolder !== "h3_irodori" || !String(take.filename || "").toLowerCase().endsWith(".wav")) return null;
-                            return {filename:take.filename, subfolder:take.subfolder, type:"output"};
+                            if (take?.type !== "output" || take.subfolder !== "h3_irodori" ||
+                                typeof take.filename !== "string" || !/^[^/\\]+\.wav$/i.test(take.filename)) return null;
+                            return { filename: take.filename, subfolder: take.subfolder, type: "output" };
                         };
+                        const audioViewUrl = ({ filename, subfolder, type }) =>
+                            "/view?" + new URLSearchParams({ filename, subfolder, type }).toString();
                         let pendingTake = normalizeTake(settings.pending_audio);
+                        let pendingText = String(settings.pending_text || "");
+                        let pendingSpeaker = settings.pending_speaker || "None";
+                        let pendingSource = String(settings.pending_source_title || "");
                         const setPreview = take => {
                             pendingTake = normalizeTake(take);
                             if (!pendingTake) {
@@ -3293,11 +3330,235 @@ app.registerExtension({
                                 previewPanel.style.display = "none";
                                 return;
                             }
-                            preview.src = `/view?filename=${encodeURIComponent(pendingTake.filename)}&subfolder=${encodeURIComponent(pendingTake.subfolder)}&type=output`;
+                            preview.src = audioViewUrl(pendingTake);
                             preview.volume = Number(volume.value) / 100;
                             previewPanel.style.display = "flex";
                         };
                         setPreview(pendingTake);
+
+                        const addTake = document.createElement("button");
+                        addTake.type = "button";
+                        addTake.className = "h3-btn-gen-prompt";
+                        addTake.textContent = "＋ 連結リストに追加";
+                        previewPanel.insertBefore(addTake, saveSection);
+
+                        const concatTitle = document.createElement("div");
+                        concatTitle.className = "h3-char-title";
+                        concatTitle.textContent = "参照音声の連結";
+                        card.appendChild(concatTitle);
+                        const storedConcatSpeaker = speakerNumber(settings.concat_speaker) ? settings.concat_speaker : null;
+                        const visibleSpeaker = storedConcatSpeaker || (speakerNumber(pendingSpeaker) ? pendingSpeaker : null)
+                            || (speakerNumber(speakerSelect.value) ? speakerSelect.value : "S1");
+                        const concatSpeaker = makeRow("連結リストの話者", makeSelect(visibleSpeaker, voiceOptions.slice(1)));
+                        const takeList = document.createElement("div");
+                        takeList.style.cssText = "display:flex;flex-direction:column;gap:8px;";
+                        card.appendChild(takeList);
+
+                        const concatGap = makeRow("セリフ間の無音（秒）",
+                            makeNumber(settings.concat_gap_seconds ?? 0.3, 0, "", 0.01));
+                        concatGap.onchange = () => store("concat_gap_seconds", Number(concatGap.value));
+                        const concatName = styleControl(document.createElement("input"));
+                        concatName.type = "text";
+                        concatName.maxLength = 80;
+                        concatName.value = settings.concat_name || "";
+                        makeRow("連結ファイル名（.wavは自動付与）", concatName);
+                        concatName.oninput = () => store("concat_name", concatName.value);
+                        const preferredSlot = assignedAudioSlot(visibleSpeaker);
+                        const concatSlot = makeRow("連結したWAVの登録先",
+                            makeSelect(settings.concat_slot ?? (preferredSlot ? preferredSlot - 1 : Number(targetSlot.value)), audioSlots));
+                        concatSlot.onchange = () => store("concat_slot", Number(concatSlot.value));
+                        const concatSave = document.createElement("button");
+                        concatSave.type = "button";
+                        concatSave.className = "h3-btn-gen-prompt";
+                        concatSave.textContent = "💾 連結してスロットへ保存";
+                        card.appendChild(concatSave);
+                        const concatStatus = document.createElement("div");
+                        concatStatus.style.cssText = "font-size:12px;color:#aab7c4;white-space:pre-wrap;";
+                        card.appendChild(concatStatus);
+                        const concatPreview = document.createElement("audio");
+                        concatPreview.controls = true;
+                        concatPreview.preload = "metadata";
+                        concatPreview.style.width = "100%";
+                        concatPreview.hidden = true;
+                        concatPreview.volume = Number(volume.value) / 100;
+                        concatPreview.setAttribute("aria-label", "連結した音声の試聴");
+                        card.appendChild(concatPreview);
+
+                        const getConcatGroups = () => {
+                            const groups = getV("irodori_tts", {}).concat_takes;
+                            return groups && typeof groups === "object" && !Array.isArray(groups) ? groups : {};
+                        };
+                        const listFor = speaker => {
+                            const entries = getConcatGroups()[speaker];
+                            return Array.isArray(entries) ? entries.filter(entry => normalizeTake(entry)) : [];
+                        };
+                        const updateAudioButtons = () => {
+                            gen.disabled = irodoriAudioBusy;
+                            addTake.disabled = irodoriAudioBusy || !pendingTake;
+                            saveBtn.disabled = irodoriAudioBusy || !pendingTake;
+                            concatSave.disabled = irodoriAudioBusy || !listFor(concatSpeaker.value).length;
+                        };
+                        const finishAudioOperation = () => {
+                            irodoriAudioBusy = false;
+                            if (card.isConnected) updateAudioButtons();
+                            else if (activeTab === "irodori") renderTabContent();
+                        };
+                        const showConcatPreview = () => {
+                            const saved = getV("irodori_tts", {}).concat_outputs?.[concatSpeaker.value];
+                            concatPreview.hidden = !saved?.input_name;
+                            if (concatPreview.hidden) {
+                                concatPreview.pause();
+                                concatPreview.removeAttribute("src");
+                                concatPreview.load();
+                            } else {
+                                const [subfolder, filename] = saved.input_name.split("/");
+                                concatPreview.src = audioViewUrl({ filename, subfolder, type: "input" });
+                            }
+                        };
+                        const saveList = (speaker, entries) => {
+                            store("concat_takes", { ...getConcatGroups(), [speaker]: entries });
+                            renderConcatList();
+                        };
+                        const pendingEntry = () => ({ ...pendingTake, text: pendingText, source_title: pendingSource });
+                        const renderConcatList = () => {
+                            const speaker = concatSpeaker.value;
+                            const entries = listFor(speaker);
+                            takeList.replaceChildren();
+                            if (!entries.length) {
+                                const empty = document.createElement("div");
+                                empty.textContent = "試聴で採用したテイクを連結リストに追加してください。";
+                                empty.style.cssText = concatStatus.style.cssText;
+                                takeList.appendChild(empty);
+                            }
+                            entries.forEach((entry, index) => {
+                                const row = document.createElement("div");
+                                row.className = "h3-field-row";
+                                const label = document.createElement("div");
+                                label.textContent = [String(index + 1), entry.source_title, entry.text || entry.filename].filter(Boolean).join("｜");
+                                label.style.cssText = "font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;";
+                                const player = document.createElement("audio");
+                                player.controls = true;
+                                player.setAttribute("aria-label", `${index + 1}番目のテイクを試聴`);
+                                player.preload = "none";
+                                player.src = audioViewUrl(entry);
+                                player.volume = Number(volume.value) / 100;
+                                player.style.width = "100%";
+                                const actions = document.createElement("div");
+                                actions.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;";
+                                const addAction = (text, disabled, handler) => {
+                                    const button = document.createElement("button");
+                                    button.type = "button";
+                                    button.className = "h3-btn-gen-prompt";
+                                    button.textContent = text;
+                                    button.disabled = disabled;
+                                    button.onclick = () => { if (!irodoriAudioBusy) handler(); };
+                                    actions.appendChild(button);
+                                    return button;
+                                };
+                                const move = offset => {
+                                    const updated = entries.slice();
+                                    const other = index + offset;
+                                    [updated[index], updated[other]] = [updated[other], updated[index]];
+                                    saveList(speaker, updated);
+                                };
+                                addAction("↑ 上へ", index === 0, () => move(-1));
+                                addAction("↓ 下へ", index === entries.length - 1, () => move(1));
+                                addAction("試聴中のテイクに差し替え", !pendingTake, () => {
+                                    if (speakerNumber(pendingSpeaker) && pendingSpeaker !== speaker) {
+                                        concatStatus.textContent = "試聴中のテイクと連結リストの話者が異なります。";
+                                        return;
+                                    }
+                                    const updated = entries.slice();
+                                    updated[index] = pendingEntry();
+                                    saveList(speaker, updated);
+                                    concatStatus.textContent = `${index + 1}番目のテイクを差し替えました。`;
+                                });
+                                addAction("削除", false, () => saveList(speaker, entries.filter((_, at) => at !== index)));
+                                row.append(label, player, actions);
+                                takeList.appendChild(row);
+                            });
+                            updateAudioButtons();
+                        };
+                        const selectConcatSpeaker = speaker => {
+                            concatSpeaker.value = speaker;
+                            const assigned = assignedAudioSlot(speaker);
+                            if (assigned) concatSlot.value = String(assigned - 1);
+                            store("concat_speaker", speaker);
+                            store("concat_slot", Number(concatSlot.value));
+                            concatStatus.textContent = "";
+                            renderConcatList();
+                            showConcatPreview();
+                        };
+                        concatSpeaker.onchange = () => selectConcatSpeaker(concatSpeaker.value);
+                        addTake.onclick = () => {
+                            if (irodoriAudioBusy || !pendingTake) return;
+                            const speaker = speakerNumber(pendingSpeaker) ? pendingSpeaker
+                                : speakerNumber(speakerSelect.value) ? speakerSelect.value : concatSpeaker.value;
+                            if (concatSpeaker.value !== speaker) selectConcatSpeaker(speaker);
+                            saveList(speaker, [...listFor(speaker), pendingEntry()]);
+                            concatStatus.textContent = `${speaker}の連結リストに追加しました。`;
+                        };
+
+                        const saveAudio = async (url, payload) => {
+                            const response = await api.fetchApi(url, {
+                                method: "POST", headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(payload),
+                            });
+                            const result = await response.json();
+                            if (!response.ok || !result.success) throw new Error(result.error || "音声の保存に失敗しました");
+                            return result;
+                        };
+                        const registerAudio = (inputName, slot, speaker) => {
+                            if (!Array.isArray(state.items)) state.items = [];
+                            state.items = state.items.filter(it => !((it.laneType || it.type) === "audio" && Number(it.slot) === slot));
+                            state.items.push({ type: "audio", laneType: "audio", slot, value: inputName });
+                            const timeline = wMap.timeline_data;
+                            if (timeline) {
+                                timeline.value = JSON.stringify(state);
+                                timeline.callback?.(timeline.value);
+                            }
+                            const widget = audioWidget(speaker);
+                            if (widget) {
+                                widget.value = `<Audio ${slot + 1}>`;
+                                widget.callback?.(widget.value);
+                            }
+                            renderFixedMediaLanes();
+                        };
+                        concatSave.onclick = async () => {
+                            if (irodoriAudioBusy) return;
+                            const speaker = concatSpeaker.value;
+                            const takes = listFor(speaker);
+                            if (!takes.length) return;
+                            const name = concatName.value.trim();
+                            if (!name) { concatStatus.textContent = "連結ファイル名を入力してください。"; concatName.focus(); return; }
+                            const slot = Number(concatSlot.value);
+                            if (![0, 1, 2].includes(slot)) { concatStatus.textContent = "A1〜A3を選択してください。"; return; }
+                            const gapSeconds = concatGap.valueAsNumber;
+                            if (!Number.isFinite(gapSeconds) || gapSeconds < 0) {
+                                concatStatus.textContent = "セリフ間の無音は0秒以上で入力してください。";
+                                return;
+                            }
+                            irodoriAudioBusy = true;
+                            updateAudioButtons();
+                            concatStatus.textContent = "音声を連結しています…";
+                            try {
+                                const result = await saveAudio("/h3/irodori/concat", {
+                                    takes: takes.map(normalizeTake), name, gap_seconds: gapSeconds,
+                                });
+                                registerAudio(result.input_name, slot, speaker);
+                                const current = getV("irodori_tts", {});
+                                const concatOutputs = { ...current.concat_outputs, [speaker]: { input_name: result.input_name } };
+                                setV("irodori_tts", { ...current, concat_outputs: concatOutputs });
+                                showConcatPreview();
+                                concatStatus.textContent = `${result.input_name} → A${slot + 1}（${takes.length}テイク、${result.duration_seconds.toFixed(2)}秒）`;
+                            } catch (error) {
+                                concatStatus.textContent = "連結エラー: " + error.message;
+                            } finally {
+                                finishAudioOperation();
+                            }
+                        };
+                        renderConcatList();
+                        showConcatPreview();
                         const fillSelect = (el, items, chosen) => {
                             el.replaceChildren();
                             for (const [id, label] of items) {
@@ -3330,8 +3591,13 @@ app.registerExtension({
                             if (!optionsReady) { status.textContent = "Irodori設定を読み込み中です"; return; }
                             const text = String(textBox.value).trim();
                             if (!text) { status.textContent = "セリフを入力してね。"; return; }
-                            gen.disabled = true;
-                            saveBtn.disabled = true;
+                            if (irodoriAudioBusy) return;
+                            const sourceId = sourceSelect.value;
+                            const source = sourceLines.get(sourceId);
+                            const takeSpeaker = source?.speaker ? `S${source.speaker}` : speakerSelect.value;
+                            const sourceTitle = source?.title || "";
+                            irodoriAudioBusy = true;
+                            updateAudioButtons();
                             const oldText = gen.textContent;
                             gen.textContent = "生成中…";
                             try {
@@ -3383,57 +3649,47 @@ app.registerExtension({
                                 const oldSettings = getV("irodori_tts", {});
                                 setV("irodori_tts", {...oldSettings, ...requestBody,
                                     seed:Math.floor(Number(seed.value)), last_generated_seed:requestBody.seed,
-                                    source:sourceSelect.value, pending_audio:take, pending_text:text});
+                                    pending_audio:take, pending_text:text, pending_speaker:takeSpeaker,
+                                    pending_source_title:sourceTitle});
                                 if (!card.isConnected) return;
+                                pendingText = text;
+                                pendingSpeaker = takeSpeaker;
+                                pendingSource = sourceTitle;
                                 setPreview(take);
+                                renderConcatList();
                                 savedStatus.textContent = "";
                                 status.textContent = "音声生成完了！試聴して気に入らなければ再度［音声生成］を押してね。";
                             } catch (e) {
                                 console.error("[HKMC Irodori]", e);
                                 status.textContent = "エラー: " + e.message;
                             } finally {
-                                gen.disabled = false;
-                                saveBtn.disabled = false;
+                                finishAudioOperation();
                                 gen.textContent = oldText;
                             }
                         };
                         saveBtn.onclick = async () => {
-                            if (!pendingTake) { savedStatus.textContent = "先に音声を生成してください。"; return; }
+                            if (irodoriAudioBusy || !pendingTake) return;
                             const name = nameInput.value.trim();
                             if (!name) { savedStatus.textContent = "保存する名前を入力してね。"; nameInput.focus(); return; }
                             const slot = Number(targetSlot.value);
                             if (![0, 1, 2].includes(slot)) { savedStatus.textContent = "A1〜A3を選んでね。"; return; }
-                            gen.disabled = true;
-                            saveBtn.disabled = true;
+                            const speaker = speakerSelect.value;
+                            const take = pendingTake;
+                            irodoriAudioBusy = true;
+                            updateAudioButtons();
                             try {
-                                const response = await api.fetchApi("/h3/irodori/attach", {
-                                    method:"POST", headers:{"Content-Type":"application/json"},
-                                    body:JSON.stringify({...pendingTake, name})
-                                });
-                                const imported = await response.json();
-                                if (!response.ok || !imported.success) throw new Error(imported.error || "音声の保存に失敗しました");
-                                if (!Array.isArray(state.items)) state.items = [];
-                                state.items = state.items.filter(it => !((it.laneType || it.type) === "audio" && Number(it.slot) === slot));
-                                state.items.push({type:"audio",laneType:"audio",slot,value:imported.input_name});
-                                const timeline = wMap.timeline_data;
-                                if (timeline) { timeline.value = JSON.stringify(state); if (timeline.callback) timeline.callback(timeline.value); }
-                                const match = /^S([1-5])$/.exec(speakerSelect.value);
-                                if (match) {
-                                    const target = wMap[`char${match[1]}_audio`];
-                                    if (target) { target.value = `<Audio ${slot+1}>`; if (target.callback) target.callback(target.value); }
-                                }
+                                const imported = await saveAudio("/h3/irodori/attach", { ...take, name });
+                                registerAudio(imported.input_name, slot, speaker);
                                 const oldSettings = getV("irodori_tts", {});
-                                setV("irodori_tts", {...oldSettings, save_name:name, speaker:speakerSelect.value,
-                                    slot, last_audio:imported.input_name, saved_take_filename:pendingTake.filename});
-                                renderFixedMediaLanes();
+                                setV("irodori_tts", {...oldSettings, save_name:name, speaker, slot,
+                                    last_audio:imported.input_name, saved_take_filename:take.filename});
                                 savedStatus.textContent = `保存完了！ ${imported.input_name} → A${slot+1}`;
                                 status.textContent = "保存完了。引き続き再生成・試聴もできます。";
                             } catch(e) {
                                 console.error("[HKMC Irodori]", e);
                                 savedStatus.textContent = "保存エラー: " + e.message;
                             } finally {
-                                gen.disabled = false;
-                                saveBtn.disabled = false;
+                                finishAudioOperation();
                             }
                         };
                     } else if (activeTab === "llm") {
