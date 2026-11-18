@@ -337,21 +337,133 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None,
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
+_H3_CLIP_DIALOGUE_BLOCK = re.compile(r"(<d>.*?</d>)", re.IGNORECASE | re.DOTALL)
+_H3_CLIP_DIALOGUE_TAG = re.compile(
+    r"(?:<\s*d\s*>|\[\s*d\s*\])(?:[ \t]*\[Japanese\])?"
+    r"|<\s*/\s*d\s*>|\[\s*/\s*d\s*\]",
+    re.IGNORECASE,
+)
+_H3_CLIP_DIALOGUE_MARKER = re.compile(r"<H3Dialogue\d+>")
+
+
+_H3_SAVED_DIALOGUE = re.compile(r"\[H3D1:([A-Za-z0-9_-]+)\]")
+_H3_INLINE_DIALOGUE = re.compile(r"H3INLINEDIALOGUE[1-9][0-9]*END")
+_H3_WRAPPED_INLINE_DIALOGUE = re.compile(
+    rf"[<＜]\s*({_H3_INLINE_DIALOGUE.pattern})\s*[>＞]"
+)
+_H3_INLINE_INSTRUCTION = (
+    "\nKeep every H3INLINEDIALOGUE numbered marker verbatim at its original position "
+    "relative to the translated actions. The markers represent the only spoken lines. "
+    "Leave each marker as plain text without angle brackets or other wrapping. "
+    "Never add dialogue, dialogue tags, or replace a marker with words."
+)
+
+
+def _h3_default_voice_audio(inputs, slot):
+    if inputs.get(f"char{slot}_enabled", slot == 1):
+        source = inputs.get(f"char{slot}_audio", "")
+    else:
+        source = inputs.get(f"subject_audio_{slot}", "")
+    match = re.search(r"<Audio\s+([1-3])>", str(source or ""), re.I)
+    return int(match[1]) if match else 0
+
+
+def _h3_inline_shot(inputs, prefix):
+    """Return an LLM-safe action and the ordered dialogue attached to it."""
+    action = str(inputs.get(prefix + "_action", "") or "")
+    events = {}
+
+    def decode(match):
+        token = match[1]
+        try:
+            data = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+            slot = data["speaker"]
+            audio = data.get("audio")
+            line = data["text"]
+            if type(slot) is not int or not 1 <= slot <= 5 or not isinstance(line, str) or not line.strip():
+                raise ValueError("invalid dialogue")
+            if audio is None:
+                audio = _h3_default_voice_audio(inputs, slot)
+            if type(audio) is not int or not 0 <= audio <= 3:
+                raise ValueError("invalid audio slot")
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            raise ValueError("保存されたセリフを読み込めません。ショット内のセリフを確認してください。") from exc
+        marker = f"H3INLINEDIALOGUE{len(events) + 1}END"
+        if not inputs.get(f"char{slot}_enabled", slot == 1) and not (
+                inputs.get(f"subject_kind_{slot}") == "人物" and str(inputs.get(f"subject_def_{slot}") or "").strip()):
+            raise ValueError(f"セリフの話者 <Subject {slot}> を人物として定義するか、セリフから別の話者を選んでください。")
+        line = re.sub(r"<\s*/?\s*d\s*>", "", line, flags=re.I).strip()
+        if not line:
+            raise ValueError("セリフの本文を入力してください。")
+        events[marker] = (slot, audio, line)
+        return "\n" + marker + "\n"
+
+    return _H3_SAVED_DIALOGUE.sub(decode, action).strip(), events
+
+
+def _h3_voice_references(shots):
+    """Pick the first selected reference per subject. Per-line overrides stay in the shot."""
+    references = {}
+    for events in shots:
+        for slot, audio, _ in events.values():
+            if audio:
+                references.setdefault(slot, audio)
+    return references
+
+
+def _h3_voice_reference(slot, audio):
+    return f"Vocal reference for <Subject {slot}> (S{slot}) is <Audio {audio}>."
+
+
+def _h3_render_inline_dialogue(action, events, *, definitions=None, references=None):
+    if _H3_INLINE_DIALOGUE.findall(action) != list(events):
+        raise ValueError("セリフの位置を翻訳結果から復元できませんでした。プロンプトを再生成してください。")
+
+    def render(match):
+        slot, audio, line = events[match[0]]
+        name = f"<Subject {slot}>" if definitions is None else definitions.get(slot, {}).get("name", f"Character {slot}")
+        speech = f"{name} (S{slot}) says: <d>[Japanese] {line} </d>"
+        if references is not None and audio != references.get(slot, 0):
+            if audio:
+                speech += f" Use <Audio {audio}> as the voice reference for this line."
+            else:
+                speech += " Use an unreferenced voice for this line."
+        return "\n" + speech + " All other characters remain non-vocal and do not lip-sync during this line.\n"
+
+    # Remove brackets added to internal markers before inserting the original dialogue.
+    action = _H3_WRAPPED_INLINE_DIALOGUE.sub(r"\1", action)
+    return _H3_INLINE_DIALOGUE.sub(render, action).strip() + (
+        "\nSpeech: Only the tagged lines have audible voices or speech-related lip movement. "
+        "Preserve environmental sounds, sound effects, and music."
+    )
+
+
 def translate_clip_texts(clips_dict, kwargs):
     if not clips_dict:
         return {}
         
     prompt_text = "Translate the following Japanese video generation prompts into English precisely.\n"
-    prompt_text += "CRITICAL RULE 1: The translation MUST be 100% in English. NO Chinese. NO Japanese.\n"
-    prompt_text += "CRITICAL RULE 2: DO NOT translate or modify any text inside <d>...</d> tags. Leave those tags and their exact contents completely untouched.\n"
+    prompt_text += "CRITICAL RULE 1: Translate prose into English.\n"
+    prompt_text += (
+        "CRITICAL RULE 2: <d>...</d> is reserved for spoken dialogue. Never add those tags "
+        "or invent dialogue. Write actions, expressions, and camera directions as plain prose. "
+        "Copy every <H3DialogueN> marker verbatim in its original position.\n"
+    )
+    if any(_H3_INLINE_DIALOGUE.search(text) for text in clips_dict.values()):
+        prompt_text += _H3_INLINE_INSTRUCTION + "\n"
     prompt_text += "CRITICAL RULE 3: DO NOT translate, modify, or remove any tags enclosed in <...> (such as <Subject 1>, <Subject 2>, <Audio 1>, <Picture 1>, etc.). Keep their exact format intact.\n"
     prompt_text += "CRITICAL RULE 4: Treat '<Subject X>' as the defined subject (person, object, or place) (like a person's name, e.g. 'Alice' or 'John') in the grammatical structure. Ensure standard English sentence syntax (e.g. '<Subject 1> turns around and looks at <Subject 2>'). DO NOT omit subjects or convert sentences into awkward sentence fragments.\n"
     prompt_text += "CRITICAL RULE 5: Output the translated texts wrapped in XML tags exactly corresponding to the input. Do not add any other text outside the XML tags.\n"
     prompt_text += "CRITICAL RULE 6: DO NOT summarize or shorten the descriptions. Translate EVERY detail, including lighting, atmosphere, character emotions, and camera movements faithfully.\n"
     prompt_text += "CRITICAL RULE 7: Keep any English instructions (such as 'CRITICAL: ...' or '[Shot X | ...]' or 'Do not continue...') exactly as they are. DO NOT translate or modify them.\n\n"
     
+    dialogue_blocks = {}
     for k, text in clips_dict.items():
-        prompt_text += f"<clip_{k}>\n{text}\n</clip_{k}>\n\n"
+        parts = _H3_CLIP_DIALOGUE_BLOCK.split(text)
+        blocks = {f"<H3Dialogue{index}>": block for index, block in enumerate(parts[1::2], 1)}
+        dialogue_blocks[k] = blocks
+        parts[1::2] = list(blocks)
+        prompt_text += f"<clip_{k}>\n{''.join(parts)}\n</clip_{k}>\n\n"
         
     provider = kwargs.get("llm_provider", "Ollama (Local)")
     api_key = kwargs.get("llm_api_key", "")
@@ -363,35 +475,110 @@ def translate_clip_texts(clips_dict, kwargs):
         print(f"Translation Error: {e}")
         return clips_dict
         
-    translations = {}
-    if result_text:
-        for k in clips_dict.keys():
-            m = re.search(fr"<clip_{k}>(.*?)</clip_{k}>", result_text, re.DOTALL | re.IGNORECASE)
-            if m:
-                t = m.group(1).strip()
-                t = re.sub(r'^(Text|Clip\s*\d+|Translation):\s*', '', t, flags=re.IGNORECASE).strip()
-                translations[k] = t
-            else:
-                translations[k] = clips_dict[k]
-                
+    translations = dict(clips_dict)
+    for k, blocks in dialogue_blocks.items():
+        tag = re.escape(str(k))
+        match = re.search(fr"<clip_{tag}>(.*?)</clip_{tag}>", result_text or "", re.DOTALL | re.IGNORECASE)
+        if not match:
+            continue
+        text = re.sub(r'^(Text|Clip\s*\d+|Translation):\s*', '', match.group(1).strip(), flags=re.IGNORECASE)
+        text = _H3_CLIP_DIALOGUE_TAG.sub("", text).strip()
+        if (text and _H3_CLIP_DIALOGUE_MARKER.findall(text) == list(blocks)
+                and _H3_INLINE_DIALOGUE.findall(text) == _H3_INLINE_DIALOGUE.findall(clips_dict[k])):
+            translations[k] = _H3_CLIP_DIALOGUE_MARKER.sub(lambda marker: blocks[marker.group()], text)
     return translations
 
-SILENT_SHOT_INSTRUCTION = (
-    "No dialogue, speech, whispering, mumbling, babbling, laughter, giggling, "
-    "humming, singing, grunts, acknowledgements, or other human vocal reactions "
-    "from any character during this shot. No speech-related lip movements or lip "
-    "synchronization. Facial expressions and physical actions remain exactly as "
+
+def _h3_recover_inline_translation(source, translated, inputs):
+    markers = _H3_INLINE_DIALOGUE.findall(source)
+    if _H3_INLINE_DIALOGUE.findall(translated) == markers and not contains_japanese(translated):
+        return translated
+
+    pieces = _H3_INLINE_DIALOGUE.split(source)
+    requests = {str(index): part.strip() for index, part in enumerate(pieces) if contains_japanese(part)}
+    replacements = translate_clip_texts(requests, inputs)
+    for key, value in replacements.items():
+        if contains_japanese(value):
+            raise ValueError("セリフ前後の描写を翻訳できませんでした。LLMの接続を確認してから再生成してください。")
+        pieces[int(key)] = value
+    return "\n".join(part.strip() for pair in zip(pieces, [*markers, ""]) for part in pair if part.strip())
+
+
+_H3_CLIP_NO_VOCALS = (
+    "No dialogue, speech, chatter, whispering, mumbling, babbling, laughter, giggling, "
+    "humming, singing, grunts, acknowledgements, unintelligible vocal sounds, or other human vocal reactions."
+)
+_H3_CLIP_NO_LIP_SYNC = (
+    "No speech-related lip movements or lip synchronization. "
+    "Facial expressions and physical actions remain exactly as "
     "specified; do not force a closed mouth when the action requires otherwise. "
     "Preserve the requested environmental sounds, sound effects, and music."
 )
+_H3_CLIP_SMILE = re.compile(r"\b(?:smile|smiles|smiling)\b|微笑|笑顔|にこり|ニコリ", re.IGNORECASE)
 
 
-def silence_shot_text(action):
-    """Speech instruction for a silent shot, with a conservative smile cue."""
-    instruction = SILENT_SHOT_INSTRUCTION
-    if re.search(r"\b(?:smile|smiles|smiling)\b|微笑|笑顔|にこり|ニコリ", action, re.IGNORECASE):
-        instruction += " If smiling, show a gentle closed-mouth smile without laughter or vocalization."
-    return "Speech: " + instruction
+def _h3_clip_shots(inputs, clip_number):
+    shots = {}
+    for shot_number in range(1, 5):
+        key = f"c{clip_number}_s{shot_number}_"
+        if not inputs.get(key + "enabled", False):
+            continue
+        time = normalize_time_expression(inputs.get(key + "time", ""))
+        action, events = _h3_inline_shot(inputs, key.rstrip("_"))
+        action = _H3_CLIP_DIALOGUE_TAG.sub("", action).strip()
+        speaker = inputs.get(key + "speaker", "None")
+        dialogue = []
+        if not events and speaker not in ("None", "セリフなし"):
+            for line in inputs.get(key + "dialogue", "").splitlines():
+                line = re.sub(r"^S\d+:\s*", "", line.strip(), flags=re.IGNORECASE)
+                line = _H3_CLIP_DIALOGUE_TAG.sub("", line).strip()
+                line = re.sub(r"^\[Japanese\]\s*", "", line, flags=re.IGNORECASE).strip().strip('"').strip("'")
+                if line:
+                    dialogue.append(f"{speaker}: <d>[Japanese] {line} </d>")
+        shots[shot_number] = (time, action, dialogue, events)
+    return shots
+
+
+def _h3_shot_heading(number, start=""):
+    heading = f"[Shot {number}]"
+    return f"{heading} At {start}," if number > 1 and start else heading
+
+
+def _h3_render_clip_shots(shots, translated_actions=None, *, mode, inputs, base_prompt=""):
+    all_silent = bool(shots) and all(not (dialogue or events) for _, _, dialogue, events in shots.values())
+    definitions = None
+    references = None
+    subject_section = ""
+    if shots and mode not in _H3_BASE_MODES:
+        subject_section, references = _h3_clip_subject_definitions(inputs, base_prompt, shots)
+    elif any(events for _, _, _, events in shots.values()):
+        definitions = _h3_base_subjects(inputs)
+    translated_actions = translated_actions or {}
+    body = []
+    for number, (slot, (time, action, dialogue, events)) in enumerate(shots.items(), 1):
+        start = time.partition("-")[0].strip()
+        if number > 1 and mode in _H3_BASE_MODES:
+            match = re.fullmatch(r"(\d+):(\d+(?:\.\d+)?)", start)
+            if match:
+                start = _h3_base_timecode(int(match[1]) * 60 + float(match[2]))
+        translated = translated_actions.get(slot, action)
+        if events:
+            translated = _h3_recover_inline_translation(action, translated, inputs)
+        translated = re.sub(r"<\s*subject\s+([1-5])\s*>",
+                            lambda match: f"<Subject {match[1]}>", translated, flags=re.I)
+        if events:
+            translated = _h3_render_inline_dialogue(
+                translated, events, definitions=definitions, references=references,
+            )
+        parts = [_h3_shot_heading(number, start), translated, *dialogue]
+        if not (dialogue or events):
+            if not all_silent:
+                parts.append(f"Speech: During this shot, all characters remain non-vocal. "
+                             f"{_H3_CLIP_NO_VOCALS} {_H3_CLIP_NO_LIP_SYNC}")
+            if _H3_CLIP_SMILE.search(action) or _H3_CLIP_SMILE.search(translated):
+                parts.append("If smiling, show a gentle closed-mouth smile.")
+        body.append("\n".join(part for part in parts if part))
+    return "\n\n".join(body), all_silent, subject_section
 
 
 _REF2VA_SILENT_SHOT = (
@@ -548,7 +735,7 @@ async def handle_convert_subject_names(request):
         return web.json_response({"text": ""})
 
 
-def build_and_generate_prompt(kwargs):
+def _h3_ref_subject_sources(kwargs, declared_speakers, *, for_translation=False):
     def process_wildcards(text):
         char_dir = os.path.join(os.path.dirname(__file__), "characters")
         def replace_match(match):
@@ -603,7 +790,11 @@ def build_and_generate_prompt(kwargs):
         if base_text:
             desc_parts.append(base_text)
         if extra:
-            desc_parts.append(f"[Extra Details - STRICTLY TRANSLATE INTO ENGLISH WITHOUT INTERPRETATION]:\n{extra}")
+            if for_translation:
+                extra_prefix = "[Extra Details - STRICTLY TRANSLATE INTO ENGLISH WITHOUT INTERPRETATION]:\n"
+                desc_parts.append(extra_prefix + extra)
+            else:
+                desc_parts.append(extra)
 
         subj_idx = i
         label = name if name else (preset if preset not in ["None", "Custom Text"] else f"Character {i}")
@@ -625,7 +816,7 @@ def build_and_generate_prompt(kwargs):
         }
 
         combined = "\n".join(desc_parts).strip()
-        if combined or name:
+        if combined or name or subj_idx in declared_speakers:
             subjects.append(f"<Subject {subj_idx}> name is {label}. {label} is {combined}" if combined else f"<Subject {subj_idx}> name is {label}.")
 
     for i in range(1, 6):
@@ -648,10 +839,85 @@ def build_and_generate_prompt(kwargs):
         audio_nums = sorted({int(n) for n in re.findall(r"<Audio\s+([1-3])>", raw_audio, re.IGNORECASE)})
         scene_refs[i] = (pic_nums, audio_nums)
 
-    char_description = process_wildcards("\n\n".join(subjects))
+    return process_wildcards("\n\n".join(subjects)), char_refs, scene_refs
+
+
+_H3_VOCAL_REFERENCE = re.compile(
+    r"(?i)\bVocal reference for\s+<Subject\s+(?P<slot>[1-5])>"
+    r"(?:[ \t]+\(S(?P<voice>[1-5])\))?\s+is\s+<Audio\s+(?P<audio>[1-3])>"
+)
+_H3_VOICE_TIMBRE_REFERENCE = re.compile(
+    r"(?i)<Audio\s+(?P<audio>[1-3])>\s+is\s+the\s+voice[- ]timbre reference for\s+"
+    r"<Subject\s+(?P<slot>[1-5])>(?:[ \t]+\(S(?P<voice>[1-5])\))?"
+)
+
+
+def _h3_clip_subject_definitions(inputs, base_prompt, shots):
+    """Use the base's resolved subject block, or rebuild it from registrations."""
+    subject_text = ""
+    headers = list(_H3_REF_SECTION_HEADER.finditer(base_prompt or ""))
+    for pos, header in enumerate(headers):
+        if header[1].lower() == "subject_definitions":
+            end = headers[pos + 1].start() if pos + 1 < len(headers) else len(base_prompt)
+            shot = _H3_REF_SHOT_HEADER.search(base_prompt, header.end(), end)
+            subject_text = base_prompt[header.end():shot.start() if shot else end].strip()
+            break
+
+    events_by_shot = [events for _, _, _, events in shots.values()]
+    selected_refs = _h3_voice_references(events_by_shot)
+    fixed_refs = {}
+    supplemental_lines = []
+
+    def read_reference(match):
+        slot, audio = int(match["slot"]), int(match["audio"])
+        fixed_refs.setdefault(slot, audio)
+        voice = match["voice"]
+        if voice and int(voice) != slot:
+            start, end = match.span("voice")
+            offset = match.start()
+            return match[0][:start - offset] + str(slot) + match[0][end - offset:]
+        return match[0]
+
+    if subject_text and subject_text.upper().rstrip(".") != "N/A":
+        subject_text = _H3_VOCAL_REFERENCE.sub(read_reference, subject_text)
+        subject_text = _H3_VOICE_TIMBRE_REFERENCE.sub(read_reference, subject_text)
+    else:
+        speakers = {slot for events in events_by_shot for slot, _, _ in events.values()}
+        subject_text, char_refs, scene_refs = _h3_ref_subject_sources(inputs, speakers)
+        for slot, data in sorted(char_refs.items()):
+            if data["pics"]:
+                supplemental_lines.append(f"Reference sheets for <Subject {slot}> include {data['pics_str']}.")
+            if data["audio"] and slot not in speakers:
+                fixed_refs[slot] = int(re.search(r"[1-3]", data["audio"])[0])
+                supplemental_lines.append(_h3_voice_reference(slot, fixed_refs[slot]))
+        for slot, (picture_numbers, audio_numbers) in sorted(scene_refs.items()):
+            if picture_numbers:
+                pictures = ", ".join(f"<Picture {number}>" for number in picture_numbers)
+                supplemental_lines.append(f"Reference sheets for <Subject {slot}> include {pictures}.")
+            if audio_numbers and slot not in speakers:
+                audios = ", ".join(f"<Audio {number}>" for number in audio_numbers)
+                supplemental_lines.append(f"Audio references for <Subject {slot}> include {audios}.")
+
+    for slot, audio in sorted(selected_refs.items()):
+        if slot not in fixed_refs:
+            fixed_refs[slot] = audio
+            supplemental_lines.append(_h3_voice_reference(slot, audio))
+
+    if supplemental_lines:
+        subject_text = "\n\n".join(filter(None, (subject_text, "\n".join(supplemental_lines))))
+    return "subject_definitions:\n" + (subject_text or "N/A"), fixed_refs
+
+
+def build_and_generate_prompt(kwargs):
+    declared_speakers = {slot for i in range(1, 5) if kwargs.get(f"shot{i}_enabled", False)
+                         for slot, _, _ in _h3_inline_shot(kwargs, f"shot{i}")[1].values()}
+    char_description, char_refs, scene_refs = _h3_ref_subject_sources(
+        kwargs, declared_speakers, for_translation=True,
+    )
 
     shots = []
     shot_speech_lines = {}
+    inline_shots = {}
 
     shot_counter = 0
     for i in range(1, 5):
@@ -662,7 +928,9 @@ def build_and_generate_prompt(kwargs):
         raw_time = kwargs.get(f"shot{i}_time", "").strip()
         norm_time = normalize_time_expression(raw_time)
 
-        action = kwargs.get(f"shot{i}_action", "").strip()
+        action, inline_dialogues = _h3_inline_shot(kwargs, f"shot{i}")
+        if inline_dialogues:
+            inline_shots[shot_counter] = (action, inline_dialogues)
         dialogue_raw = kwargs.get(f"shot{i}_dialogue", "").strip()
         speaker_choice = kwargs.get(f"shot{i}_speaker", "None")
 
@@ -683,7 +951,7 @@ def build_and_generate_prompt(kwargs):
                 dia = re.sub(r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE).strip().strip('"').strip("'")
                 if dia:
                     dia_lines.append(f"{speaker_prefix}<d>[Japanese] {dia} </d>")
-        shot_speech_lines[shot_counter] = dia_lines or [_REF2VA_SILENT_SHOT]
+        shot_speech_lines[shot_counter] = [] if inline_dialogues else dia_lines or [_REF2VA_SILENT_SHOT]
 
         if content:
             shots.append(f"[Shot {shot_counter} | {norm_time}]\n" + "\n".join(content))
@@ -714,6 +982,8 @@ def build_and_generate_prompt(kwargs):
         "speech instructions, or mouth movements absent from the input. "
         "Dialogue and silent-shot instructions are added separately."
     )
+    if inline_shots:
+        speech_guard += _H3_INLINE_INSTRUCTION
     if shot_speech_lines and all(lines == [_REF2VA_SILENT_SHOT] for lines in shot_speech_lines.values()):
         speech_guard += (
             " The video is entirely non-vocal. Keep the requested non-vocal "
@@ -732,7 +1002,10 @@ def build_and_generate_prompt(kwargs):
     summary_roles = "\n".join(summary_subject_roles) or "None"
     summary_story = kwargs.get("overall_story", "").strip()
     direct_picture = any(ref[0] for ref in scene_refs.values()) or any(ref["pics"] for ref in char_refs.values())
-    direct_audio = any(ref[1] for ref in scene_refs.values()) or any(ref["audio"] for ref in char_refs.values())
+    inline_slots = {slot for _, events in inline_shots.values() for slot, _, _ in events.values()}
+    direct_audio = (any(ref[1] for slot, ref in scene_refs.items() if slot not in inline_slots)
+                    or any(ref["audio"] for slot, ref in char_refs.items() if slot not in inline_slots)
+                    or any(audio for _, events in inline_shots.values() for _, audio, _ in events.values()))
     if direct_picture and direct_audio:
         summary_task_tag = "[reference generation + audio reference]"
     elif direct_picture:
@@ -1021,6 +1294,21 @@ def build_and_generate_prompt(kwargs):
             block = match.group(1).rstrip()
             prompt_result = prompt_result[:match.start()] + block + "\n" + "\n".join(lines) + "\n\n" + prompt_result[match.end():]
 
+    inline_references = _h3_voice_references(events for _, events in inline_shots.values())
+    if inline_slots:
+        voice_section = []
+        for slot in sorted(inline_slots):
+            prompt_result = re.sub(
+                rf"(?im)^[ \t]*(?:Vocal reference for|Audio references for) <Subject {slot}>[^\n]*\n?",
+                "", prompt_result,
+            )
+            if slot in inline_references:
+                voice_section.append(_h3_voice_reference(slot, inline_references[slot]))
+        if voice_section:
+            prompt_result = re.sub(r"(?im)^summary\s*:", lambda match:
+                                   "\n".join(voice_section) + "\n\n" + match[0],
+                                   prompt_result, count=1)
+
     try:
         retention_choices = json.loads(kwargs.get("retention_choices_json", "{}") or "{}")
         if not isinstance(retention_choices, dict):
@@ -1047,6 +1335,9 @@ def build_and_generate_prompt(kwargs):
             picture_nums, audio_nums = scene_refs.get(idx, ([], []))
             picture_tags = [f"<Picture {n}>" for n in picture_nums]
             audio_tags = [f"<Audio {n}>" for n in audio_nums]
+        if idx in inline_slots:
+            audio_tags = sorted({f"<Audio {audio}>" for _, events in inline_shots.values()
+                                 for slot, audio, _ in events.values() if slot == idx and audio})
         default_policy = "partially_preserved" if kind == "背景" else "fully_preserved"
         policy = retention_choices.get(f"subject_{idx}", default_policy)
         if policy not in visual_policies:
@@ -1119,12 +1410,8 @@ def build_and_generate_prompt(kwargs):
         print("[H3 Prompt Director] retention_analysis section not found; left output unchanged")
 
     def _format_output_shot_header(match):
-        number = int(match.group(1))
-        raw_range = match.group(2).strip()
-        if number == 1:
-            return "[Shot 1]"
-        start = raw_range.split("-", 1)[0].strip()
-        return f"[Shot {number}] At {start}," if start else f"[Shot {number}]"
+        start = match.group(2).partition("-")[0].strip()
+        return _h3_shot_heading(int(match.group(1)), start)
 
     _detail_section = re.compile(
         r"(?ims)(^detailed_description:\s*\n)(.*?)(?=^(?:overall_soundscape|non_diegetic_music):|\Z)"
@@ -1208,6 +1495,12 @@ def build_and_generate_prompt(kwargs):
                 error = f"REF2VA/HYBRID 最終出力のショット{shot_num}: {reason}"
                 print(f"[H3 Prompt Director] {error}")
                 raise H3RefPromptValidationError(error)
+            if shot_num in inline_shots:
+                source, events = inline_shots[shot_num]
+                narration = _h3_recover_inline_translation(source, narration, kwargs)
+                narration = _h3_render_inline_dialogue(narration, events, references=inline_references)
+            elif _H3_INLINE_DIALOGUE.search(narration):
+                raise H3RefPromptValidationError(f"ショット{shot_num}に別ショットのセリフ位置が混入しました。")
             parts.append("\n".join(part for part in [header, narration, *protected] if part) + "\n\n")
         return head + detail[:headers[0].start()] + "".join(parts).rstrip() + "\n\n"
 
@@ -1233,8 +1526,41 @@ _H3_BASE_MODES = {"T2VA", "I2VA", "FL2VA"}
 _H3_BASE_CONTINUATION = (
     "Continue directly from the incoming protected H3 audiovisual latent prefix. "
     "Maintain the existing character identities, positions, actions, camera trajectory, "
-    "lighting, scene continuity, and ongoing audio. Do not restart or re-establish the scene.\n\n"
+    "lighting, scene continuity, and ongoing {audio}. Do not restart or re-establish the scene."
 )
+_H3_REF_CONTINUATION = (
+    "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. "
+    "The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, "
+    "camera trajectory, facial state, lighting, environment, object state, ambience, and timing. "
+    "Connected reference images are optional; use them only to preserve stable subject identity "
+    "and appearance beneath that incoming state."
+)
+
+
+def _h3_finalize_clip_prompt(text, mode, do_continue, link_next, all_silent, *, subject_section=""):
+    parts = []
+    do_continue = do_continue or mode not in _H3_BASE_MODES
+    if do_continue:
+        intro = (_H3_BASE_CONTINUATION.format(audio="non-vocal audio" if all_silent else "audio")
+                 if mode in _H3_BASE_MODES else _H3_REF_CONTINUATION)
+        parts.append(intro)
+        if text.lstrip().startswith(intro):
+            text = text.lstrip()[len(intro):].lstrip()
+    if subject_section:
+        parts.append(subject_section)
+    if all_silent:
+        scope = "Throughout this clip, all characters remain non-vocal. "
+        if do_continue:
+            scope += "Do not continue, extend, imitate, or infer any voice or vocalization from the incoming audio. "
+        parts.append(f"{scope}{_H3_CLIP_NO_VOCALS} {_H3_CLIP_NO_LIP_SYNC}")
+    parts.append(text)
+    if link_next:
+        sound = "existing non-vocal environmental sound" if all_silent else "sound"
+        parts.append(
+            f"Continue the exact motion and {sound} already in progress, then develop the next action naturally. "
+            "[DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
+        )
+    return "\n\n".join(parts)
 
 
 def h3_generation_mode(kwargs):
@@ -1306,8 +1632,9 @@ def _h3_base_shot_data(kwargs):
             raise ValueError(f"ショット{idx}の時間が不正です。開始時刻は昇順で、前ショットと重複させず、終了時刻は開始より後にしてください。")
         last_start = start
         last_end = end
+        action, events = _h3_inline_shot(kwargs, f"shot{idx}")
         dialogues = []
-        raw_dialogue = str(kwargs.get(f"shot{idx}_dialogue", "") or "").strip()
+        raw_dialogue = "" if events else str(kwargs.get(f"shot{idx}_dialogue", "") or "").strip()
         speaker = str(kwargs.get(f"shot{idx}_speaker", "None") or "None")
         if speaker not in ("None", "セリフなし") and raw_dialogue:
             for raw_line in raw_dialogue.splitlines():
@@ -1319,7 +1646,7 @@ def _h3_base_shot_data(kwargs):
                     dialogues.append(line)
         shots.append({"index": len(shots) + 1, "authoring_slot": idx,
                       "start": start, "end": end,
-                      "action": str(kwargs.get(f"shot{idx}_action", "") or "").strip(),
+                      "action": action, "inline_dialogues": events,
                       "speaker": speaker if dialogues else None,
                       "dialogues": dialogues})
     return shots
@@ -1629,9 +1956,7 @@ def _h3_base_from_structured_shots(raw, shots, definitions, visible_characters=N
             else:
                 intro = "The speaker says"
             prose += f"\n{intro} <d>[Japanese] {dialogue} </d>."
-        header = f"[Shot {num}]"
-        if num > 1:
-            header += f" At {_h3_base_timecode(shot['start'])},"
+        header = _h3_shot_heading(num, _h3_base_timecode(shot["start"]) if num > 1 else "")
         lines.append(header + " " + prose)
     audio = {}
     for name in ("overall_soundscape", "non_diegetic_music"):
@@ -2026,9 +2351,11 @@ def build_h3_base_prompt(kwargs):
     base_subject_kwargs = dict(kwargs)
     for idx in range(1, 6):
         if not kwargs.get(f"char{idx}_enabled", idx == 1):
-            if not re.search(rf"<\s*Subject\s*{idx}\s*>", source_actions, re.I):
+            spoken_by = any(slot == idx for shot in shots for slot, _, _ in shot["inline_dialogues"].values())
+            if not spoken_by and not re.search(rf"<\s*Subject\s*{idx}\s*>", source_actions, re.I):
                 base_subject_kwargs[f"subject_def_{idx}"] = ""
     definitions = _h3_base_subjects(base_subject_kwargs)
+    has_inline_dialogue = any(shot["inline_dialogues"] for shot in shots)
     visible_characters = _h3_base_visible_characters(shots, definitions)
     summary = ""
     duration = shots[-1]["end"]
@@ -2072,6 +2399,8 @@ def build_h3_base_prompt(kwargs):
     }, ensure_ascii=False)
     instructions = (primary_rules.replace("{{CREATIVITY}}", tone)
                     .replace("{{INPUT_JSON}}", input_data))
+    if has_inline_dialogue:
+        instructions += _H3_INLINE_INSTRUCTION
     provider = kwargs.get("llm_provider", "Ollama (Local)")
     api_key = kwargs.get("llm_api_key", "")
     model = str(kwargs.get("llm_model", "") or "").strip()
@@ -2103,6 +2432,24 @@ def build_h3_base_prompt(kwargs):
                                             mode, duration, len(shots), definitions,
                                             dialogue_expectations, [shot["start"] for shot in shots])
             
+            if has_inline_dialogue:
+                headers = list(re.finditer(r"(?im)^\[Shot (\d+)\](?:[ \t]+At[ \t]+[\d:.]+,)?[ \t]*", output))
+                sound_start = re.search(r"(?im)^overall_soundscape:", output).start()
+                pieces = [output[:headers[0].start()]]
+                for index, header in enumerate(headers):
+                    end = headers[index + 1].start() if index + 1 < len(headers) else sound_start
+                    action = output[header.end():end].strip()
+                    events = shots[index]["inline_dialogues"]
+                    if events:
+                        action = _h3_recover_inline_translation(shots[index]["action"], action, kwargs)
+                        action = _h3_base_resolve_subjects(action, definitions)
+                        action = _h3_render_inline_dialogue(action, events, definitions=definitions)
+                    else:
+                        action = _H3_INLINE_DIALOGUE.sub("", action).strip()
+                        if not shots[index]["dialogues"]:
+                            action += "\n" + _REF2VA_SILENT_SHOT
+                    pieces.append(header[0].rstrip() + "\n" + action + "\n\n")
+                output = "".join(pieces) + output[sound_start:]
             if mode == "FL2VA":
                 output = _h3_fl2va_normalize_body_picture_mentions(output)
             elif mode == "I2VA":
@@ -2988,6 +3335,7 @@ async def handle_interactive_base_revise(request):
             '【保護】登場人物、場所、確定した出来事、道具の種類と使い方、台詞、話者は変更しません。'
             '新しい事件・新キャラ・新しい台詞を創作しないこと。'
             '<Subject 1>等の既存タグを全て原文と同じ綴りで保持し、存在しないタグを創作しないこと。'
+            'H3POSEDSPEECH番号ENDはセリフ位置を表す。各ショットで綴りと順序を維持し、元の動作との前後関係を変えないこと。'
             '固有名詞はregistered_namesに従って保持。'
             '修正はactionのみ。time、enabled、dialogue、speakerには一切触れないこと。\n'
             '【対象】targetが番号ならそのショットだけ。autoなら指示中に明示されたショットを優先。'
@@ -3061,7 +3409,7 @@ async def handle_interactive_base_revise(request):
     except Exception as e:
         return web.json_response({'success': False, 'error': str(e)}, status=400)
 
-def parse_auto_scenario_response(text, no_clips=False, clip_count=1):
+def parse_auto_scenario_response(text):
     if not isinstance(text, str) or not text.strip():
         raise ValueError("LLMの回答が空です。モデルの応答を確認してください。")
 
@@ -3098,18 +3446,11 @@ def parse_auto_scenario_response(text, no_clips=False, clip_count=1):
         decoded = None
     if isinstance(decoded, dict):
         base = normalize_shots(decoded.get("base_shots", decoded.get("base", {})))
-        clip_data = decoded.get("clips_data", decoded.get("clips", {}))
-        clips = {}
-        if isinstance(clip_data, dict):
-            for key, rows in clip_data.items():
-                match = re.search(r"\d+", str(key))
-                if match:
-                    clips[match.group()] = normalize_shots(rows)
-        if base and (no_clips or all(clips.get(str(i)) for i in range(1, clip_count + 1))):
-            return {"base": base, "clips": clips}
+        if base:
+            return base
 
-    scenario = {"base": {}, "clips": {}}
-    current_video = None
+    shots = {}
+    in_base = True
     current_shot = None
     for raw_line in raw.splitlines():
         line = raw_line.strip()
@@ -3121,27 +3462,23 @@ def parse_auto_scenario_response(text, no_clips=False, clip_count=1):
             continue
         group = re.match(r"^(?:={2,}\s*)?(?:[\[<]\s*)?(BASE|ベース(?:動画)?)(?:\s*[\]>])?(?:\s*={2,})?\s*:?\s*$", line, re.I)
         if group:
-            current_video = "base"
+            in_base = True
             current_shot = None
             continue
         group = re.match(r"^(?:={2,}\s*)?(?:[\[<]\s*)?(?:CLIP|クリップ)\s*(\d+)(?:\s*[\]>])?(?:\s*={2,})?\s*:?\s*$", line, re.I)
         if group:
-            current_video = "clip_" + group.group(1)
-            current_shot = None
-            scenario["clips"].setdefault(group.group(1), {})
+            in_base = False
+            continue
+        if not in_base:
             continue
         shot = re.match(r"^(?:[\[<]\s*)?(?:Shot|ショット)\s*([1-4])\s*(?:[|｜]\s*([^\]>]+))?\s*(?:[\]>])?\s*:?\s*$", line, re.I)
         if shot:
-            if current_video is None:
-                current_video = "base"
             current_shot = int(shot.group(1))
-            dest = scenario["base"] if current_video == "base" else scenario["clips"].setdefault(current_video[5:], {})
-            dest[current_shot] = {"time": (shot.group(2) or "").strip(), "action": ""}
+            shots[current_shot] = {"time": (shot.group(2) or "").strip(), "action": ""}
             continue
-        if current_video is None or current_shot is None:
+        if current_shot is None:
             continue
-        dest = scenario["base"] if current_video == "base" else scenario["clips"][current_video[5:]]
-        row = dest[current_shot]
+        row = shots[current_shot]
         timing = re.match(r"^(?:\[\s*Time\s*\]|Time|\[\s*時間\s*\]|時間)\s*[:：]?\s*(.*)$", line, re.I)
         if timing:
             row["time"] = timing.group(1).strip()
@@ -3153,16 +3490,10 @@ def parse_auto_scenario_response(text, no_clips=False, clip_count=1):
         if line not in ("```", "---"):
             row["action"] = (row["action"] + "\n" + line).strip()
 
-    scenario["base"] = {i: row for i, row in scenario["base"].items() if row["action"].strip()}
-    scenario["clips"] = {k: {i: row for i, row in rows.items() if row["action"].strip()}
-                         for k, rows in scenario["clips"].items()}
-    if not scenario["base"]:
+    shots = {i: row for i, row in shots.items() if row["action"].strip()}
+    if not shots:
         raise ValueError("LLMの回答からベース動画のショットを読み取れませんでした。原案を確認して再実行してください。")
-    if not no_clips:
-        missing = [str(i) for i in range(1, clip_count + 1) if not scenario["clips"].get(str(i))]
-        if missing:
-            raise ValueError("LLMの回答にクリップ " + ", ".join(missing) + " のショットがありません。『クリップ生成をしない』の設定も確認してください。")
-    return scenario
+    return shots
 
 
 def bulk_storyboard_shot_count(seconds):
@@ -3182,18 +3513,43 @@ def bulk_storyboard_timecode(seconds):
     return f"{minutes}:{remainder:04.1f}"
 
 
-def build_bulk_storyboard_instruction(story, duration, clip_count, no_clips, character_context):
-    clip_duration = round(max(0.0, duration - 1.6), 1)
-    if not no_clips and clip_duration < 1:
-        raise ValueError("クリップありの構成では動画の長さを3秒以上に設定してください。")
-    video_plan = [("BASE", float(duration), bulk_storyboard_shot_count(duration))]
-    if not no_clips:
-        video_plan.extend((f"CLIP {index}", clip_duration, bulk_storyboard_shot_count(clip_duration))
-                          for index in range(1, clip_count + 1))
-    total_duration = float(duration) if no_clips else round(duration + clip_duration * clip_count, 1)
+_H3_BULK_QUOTED_TEXT = re.compile(r'(<d>.*?</d>|「[^」]*」|『[^』]*』|"[^"\n]*")', re.I | re.S)
+_H3_BULK_SUBJECT = re.compile(
+    r"[<＜]\s*(?:subject\s*[:：]?|[sｓＳ])\s*([0-9０-９]+)\s*[>＞]"
+    r"|(?<![A-Za-z0-9_<＜])(?:subject\s+|[sｓＳ])([0-9０-９]+)(?![A-Za-z0-9_>＞])",
+    re.I,
+)
+_H3_BULK_UNMAPPED_PAIR = re.compile(
+    r"(?<![ァ-ヶー])([ァ-ヶ][ァ-ヶー]+)と([ァ-ヶ][ァ-ヶー]+)"
+    r"(?=の(?:後ろ|背後|肩越し)|(?:は|が)[^。！？\n]{0,24}(?:二人|顔を見合わせ|肩を並べ|会話|談笑))"
+)
+
+
+def _bulk_storyboard_subject_codes(text, names, *, clean_separators=False):
+    """Use the registered name conversion in narration and preserve quoted text."""
+    parts = _H3_BULK_QUOTED_TEXT.split(text)
+    slots = set()
+
+    def replace_subject(match):
+        slot = int(match.group(1) or match.group(2))
+        slots.add(slot)
+        return f"<subject {slot}>"
+
+    for index in range(0, len(parts), 2):
+        part = convert_named_subjects(parts[index], names, ignore_case=True)
+        part = _H3_BULK_SUBJECT.sub(replace_subject, part)
+        if clean_separators:
+            part = re.sub(r"(?m)^([ \t]*)[;；]+[ \t]*(?=<subject \d+>)", r"\1", part)
+            part = re.sub(r"([。！？!?])[ \t]*[;；]+[ \t]*(?=<subject \d+>)", r"\1", part)
+            part = re.sub(r"[ \t]*[;；]+[ \t]*(?=<subject \d+>)", "\n", part)
+        parts[index] = part
+    return "".join(parts), slots
+
+
+def build_bulk_storyboard_instruction(story, duration, count, subject_context):
     lines = [
         "あなたは映像のショット構成・演出を考案する熟練の映画監督兼絵コンテ作家です。",
-        "ユーザーの日本語原案から、動画生成用の具体的な撮影設計を日本語で作成してください。",
+        "ユーザーの日本語原案から、1本のベース動画の具体的な撮影設計を日本語で作成してください。",
         "原案の文章を短く書き直す仕事ではありません。撮影する映像を新たに設計する仕事です。",
         "すべて日本語で回答してください。出力は指定されたショット書式だけにしてください。",
         "",
@@ -3206,21 +3562,18 @@ def build_bulk_storyboard_instruction(story, duration, clip_count, no_clips, cha
         "6. 動画の短さに合わせ、実際に画面で表現できる動作量にしてください。動作を抽象語や要約だけで済ませないでください。",
         "7. 明るさ、光、空気感、表情は映像として自然な範囲で補足できますが、原案にない物体・人物・主要な行動は追加しないでください。",
         "8. 『〜している様子が描写される』『情景が映る』だけで終えず、カメラが何をどう映し、被写体がどう動くのかを具体的に描いてください。",
-        "9. 出力は各動画とも指定数のショットを必ず埋めてください。全ショットの[Time]と[Action]が必要です。1動画のショット数は最大4です。",
+        "9. 出力は指定数のショットを必ず埋めてください。全ショットの[Time]と[Action]が必要です。ショット数は最大4です。",
         "10. セリフが原案にあれば該当する場面へ原文のまま記してください。原案にないセリフや発声は作らないでください。",
+        "11. 原案にある登録済みの人物・背景・物の参照は、[Action]の本文で必ず入力と同じ <subject N> を使ってください。"
+        "最初に画面に登場するショットから、該当するタグで明示してください。"
+        "タグをS番号や固有名詞に変えず、名前を翻訳・音写・創作しないでください。"
+        "タグの前にセミコロンを付けず、原文のセリフに含まれる名前はそのままにしてください。",
         "",
         "【動画尺と編集】",
-        f"ベース動画の長さ: {duration}秒。",
-        f"クリップ本数: {0 if no_clips else clip_count}本。",
-        f"全体の再生尺: 約{bulk_storyboard_timecode(total_duration)}。",
-    ]
-    if not no_clips:
-        lines.append(f"各クリップは前動画と約1.6秒重なり、時間軸の進みは約{clip_duration}秒です。クリップ内[Time]は毎回0:00.0から始まります。")
-        lines.append("重なり時間では動作を自然につなぎ、同じ出来事を長々と繰り返さないでください。")
-    lines.extend([
+        f"ベース動画の長さ: {duration:g}秒。",
         "",
-        "【使用できる人物】",
-        character_context or "人物名は原案に記載されたものを使用",
+        "【使用できるSubjectタグ】",
+        subject_context or "登録なし。人物名は原案に記載された表記を使用してください。",
         "",
         "【ユーザーの原案】",
         story,
@@ -3229,46 +3582,86 @@ def build_bulk_storyboard_instruction(story, duration, clip_count, no_clips, cha
         "次の見出しとショット枠をすべて出力してください。見出しの省略、ショットの結合、JSON、Markdown、補足説明は禁止です。",
         "各[Action]には原案の短い言い換えではなく、上記のカメラと映像上の演出を具体的な日本語の文章で記述してください。",
         "カメラ指示と行動を[Action]内の同じ文章で一体化し、ショットの時間順に書いてください。",
-        ""
-    ])
-    for label, seconds, count in video_plan:
-        lines.append(f"==={label}===")
-        for shot in range(1, count + 1):
-            start_sec = round(seconds * (shot - 1) / count, 1)
-            end_sec = round(seconds * shot / count, 1)
-            lines.extend([
-                f"<Shot {shot}>",
-                f"[Time] {bulk_storyboard_timecode(start_sec)}-{bulk_storyboard_timecode(end_sec)}",
-                "[Action] この区間で実際に撮影する映像について、構図・カメラの動き・人物や物の具体的な動作と表情・連続性を含む詳細な日本語の文章",
-            ])
-        lines.append("")
-    lines.append("すべての[Action]の例文を実際の撮影描写に置き換え、物語の最後の出来事を最終ショットに配置してください。")
-    return "\n".join(lines), video_plan
+        "",
+        "===BASE===",
+    ]
+    for shot in range(1, count + 1):
+        start_sec = round(duration * (shot - 1) / count, 1)
+        end_sec = round(duration * shot / count, 1)
+        lines.extend([
+            f"<Shot {shot}>",
+            f"[Time] {bulk_storyboard_timecode(start_sec)}-{bulk_storyboard_timecode(end_sec)}",
+            "[Action] この区間で実際に撮影する映像について、構図・カメラの動き・人物や物の具体的な動作と表情・連続性を含む詳細な日本語の文章",
+        ])
+    lines.append("\nすべての[Action]の例文を実際の撮影描写に置き換え、物語の最後の出来事を最終ショットに配置してください。")
+    return "\n".join(lines)
 
 
-def validate_bulk_storyboard_scenario(scenario, video_plan):
-    for label, seconds, expected_count in video_plan:
-        if label == "BASE":
-            shots = scenario.get("base", {})
-        else:
-            clip_id = label.split()[-1]
-            shots = scenario.get("clips", {}).get(clip_id, {})
-        if len(shots) != expected_count or set(shots) != set(range(1, expected_count + 1)):
-            return f"{label}のショットが{len(shots)}件です。{expected_count}件の連続したショットが必要です。"
-        for index in range(1, expected_count + 1):
-            row = shots[index]
-            action = str(row.get("action", "")).strip()
-            if not action:
-                return f"{label}のショット{index}に撮影文章がありません。"
-            if "この区間で実際に撮影する映像" in action or "アクション描写" in action:
-                return f"{label}のショット{index}がテンプレートのままです。"
-            if len(action) < 35:
-                return f"{label}のショット{index}が短すぎます。カメラと具体的な動作を考案してください。"
-            if not re.search(r"カメラ|ショット|構図|視点|俯瞰|煽り|肩越し|背後|正面|横|アップ|クローズ|ズーム|パン|ドリー|追従|旋回|撮影|捉え|映す|接写|固定|引き|寄る|ワイド|camera|close.up|medium shot|wide shot|tracking|angle", action, re.I):
-                return f"{label}のショット{index}に構図やカメラの指示がありません。"
-            if not str(row.get("time", "")).strip():
-                return f"{label}のショット{index}に時間指定がありません。"
+def validate_bulk_storyboard_shots(shots, expected_count):
+    label = "ベース動画"
+    if len(shots) != expected_count or set(shots) != set(range(1, expected_count + 1)):
+        return f"{label}のショットが{len(shots)}件です。{expected_count}件の連続したショットが必要です。"
+    for index in range(1, expected_count + 1):
+        row = shots[index]
+        action = str(row.get("action", "")).strip()
+        if not action:
+            return f"{label}のショット{index}に撮影文章がありません。"
+        if "この区間で実際に撮影する映像" in action or "アクション描写" in action:
+            return f"{label}のショット{index}がテンプレートのままです。"
+        if len(action) < 35:
+            return f"{label}のショット{index}が短すぎます。カメラと具体的な動作を考案してください。"
+        if not re.search(r"カメラ|ショット|構図|視点|俯瞰|煽り|肩越し|背後|正面|横|アップ|クローズ|ズーム|パン|ドリー|追従|旋回|撮影|捉え|映す|接写|固定|引き|寄る|ワイド|camera|close.up|medium shot|wide shot|tracking|angle", action, re.I):
+            return f"{label}のショット{index}に構図やカメラの指示がありません。"
+        if not str(row.get("time", "")).strip():
+            return f"{label}のショット{index}に時間指定がありません。"
     return ""
+
+
+async def _generate_bulk_storyboard_shots(data, prompt, shot_count, names, source_story, source_slots, allowed_slots):
+    feedback = ""
+    for attempt in range(1, 3):
+        instruction = prompt
+        if feedback:
+            instruction += ("\n\n【再生成の必須修正】\n前回の回答は使用できません。理由: " + feedback +
+                            "\n同じ原案で全ショットを考案し直し、指定した全セクションと全[Time]・[Action]を埋めてください。回答は指定書式だけにしてください。")
+        raw = await asyncio.to_thread(_director_llm_input, data, instruction, 0.7 if attempt == 1 else 0.3)
+        try:
+            shots = parse_auto_scenario_response(raw)
+            feedback = validate_bulk_storyboard_shots(shots, shot_count)
+            if not feedback:
+                used_slots = set()
+                unmapped_pairs = set()
+                for shot in shots.values():
+                    shot["action"], slots = _bulk_storyboard_subject_codes(
+                        shot["action"], names, clean_separators=True
+                    )
+                    used_slots.update(slots)
+                    if len(source_slots) >= 2:
+                        narration = _H3_BULK_QUOTED_TEXT.split(shot["action"])[::2]
+                        for part in narration:
+                            unmapped_pairs.update(
+                                match.group() for match in _H3_BULK_UNMAPPED_PAIR.finditer(part)
+                                if all(name not in source_story for name in match.groups())
+                            )
+                missing = source_slots - used_slots
+                unexpected = used_slots - allowed_slots
+                issues = []
+                if missing:
+                    tags = "、".join(f"<subject {slot}>" for slot in sorted(missing))
+                    issues.append(f"原案の参照タグ {tags} がショット本文にありません。該当する名前表記をタグに戻してください。")
+                if unexpected:
+                    tags = "、".join(f"<subject {slot}>" for slot in sorted(unexpected))
+                    issues.append(f"使用できない参照タグ {tags} がショット本文にあります。原案の対応関係を確認してください。")
+                if unmapped_pairs:
+                    labels = "、".join(sorted(unmapped_pairs))
+                    issues.append(f"原案にない人物名のような表記 {labels} があります。登場人物は対応する <subject N> にそろえてください。")
+                feedback = " ".join(issues)
+        except ValueError as exc:
+            feedback = str(exc)
+        if not feedback:
+            return shots
+        print(f"[H3 Prompt Director] Bulk scenario needs retry: attempt={attempt}, reason={feedback}")
+    raise ValueError("旧おまかせの絵コンテ生成が不完全でした（" + feedback + "）。")
 
 
 @PromptServer.instance.routes.post("/h3/generate_auto_scenario")
@@ -3282,44 +3675,36 @@ async def handle_generate_auto_scenario(request):
         story = auto_data.get("story", "")
         if not isinstance(story, str) or not story.strip():
             raise ValueError("物語・あらすじ・シチュエーション入力が空です。原案を入力してください。")
-        clip_count = max(1, min(10, int(auto_data.get("clipCount", 1))))
-        no_clips = auto_data.get("noClips", False) is True
         duration = max(1, min(15, int(auto_data.get("duration", 5))))
-        characters = []
+        names = {}
+        configured_slots = set()
         for index in range(1, 6):
             if data.get(f"char{index}_enabled", False):
                 name = str(data.get(f"char{index}_name", "") or "").strip()
                 preset = data.get(f"char{index}_preset", "None")
-                label = name if name else (preset if preset not in ("None", "Custom Text") else f"Character {index}")
-                characters.append(f"S{index}: {label}")
-        prompt, plan = build_bulk_storyboard_instruction(story.strip(), duration, clip_count, no_clips, ", ".join(characters))
-        provider = data.get("llm_provider", "Ollama (Local)")
-        api_key = data.get("llm_api_key", "")
-        model_name = str(data.get("llm_model", "") or "").strip()
-        feedback = ""
-        for attempt in range(1, 3):
-            instruction = prompt
-            if feedback:
-                instruction += ("\n\n【再生成の必須修正】\n前回の回答は使用できません。理由: " + feedback +
-                                "\n同じ原案で全ショットを考案し直し、指定した全セクションと全[Time]・[Action]を埋めてください。回答は指定書式だけにしてください。")
-            raw_result = await asyncio.to_thread(call_llm, instruction, provider, api_key, model_name,
-                                                 0.7 if attempt == 1 else 0.3)
-            try:
-                scenario = parse_auto_scenario_response(raw_result, no_clips=no_clips, clip_count=clip_count)
-                feedback = validate_bulk_storyboard_scenario(scenario, plan)
-            except ValueError as exc:
-                feedback = str(exc)
-            if not feedback:
-                print(f"[H3 Prompt Director] Bulk director scenario: attempt={attempt}, plan={[(p[0], p[2]) for p in plan]}")
-                return web.json_response({
-                    "success": True,
-                    "base_shots": scenario["base"],
-                    "clips_data": scenario["clips"],
-                })
-            print(f"[H3 Prompt Director] Bulk scenario needs retry: attempt={attempt}, reason={feedback}")
-        raise ValueError("旧おまかせの絵コンテ生成が不完全でした（" + feedback + "）。既存のショットは変更していません。")
+                if not name and isinstance(preset, str) and preset not in ("None", "Custom Text"):
+                    name = preset.strip()
+                configured_slots.add(index)
+            else:
+                name = str(data.get(f"subject_def_{index}", "") or "").strip()
+                if name:
+                    configured_slots.add(index)
+            if name:
+                names[index] = name
+        story, source_slots = _bulk_storyboard_subject_codes(story.strip(), names)
+        if source_slots - set(range(1, 6)):
+            raise ValueError("原案のSubjectタグは <subject 1>〜<subject 5> を使用してください。")
+        allowed_slots = configured_slots | source_slots
+        subject_context = "、".join(f"<subject {slot}>" for slot in sorted(allowed_slots))
+        shot_count = bulk_storyboard_shot_count(duration)
+        prompt = build_bulk_storyboard_instruction(story, duration, shot_count, subject_context)
+        base_shots = await _generate_bulk_storyboard_shots(
+            data, prompt, shot_count, names, story, source_slots, allowed_slots
+        )
+        print(f"[H3 Prompt Director] Bulk director scenario: base_shots={len(base_shots)}")
+        return web.json_response({"success": True, "base_shots": base_shots})
     except Exception as exc:
-        return web.json_response({"success": False, "error": str(exc)}, status=500)
+        return web.json_response({"success": False, "error": str(exc) + " 既存のショットは変更していません。"}, status=500)
 
 
 @PromptServer.instance.routes.post("/h3/generate_prompt")
@@ -3336,112 +3721,50 @@ async def handle_generate_prompt(request):
             if data.get("llm_provider") == "Ollama (Local)":
                 await asyncio.to_thread(unload_ollama_vram, data.get("llm_model", "qwen2.5:7b-instruct-q5_K_M"))
         
-        clip_prompts_out = {}
+        mode = h3_generation_mode(data)
+        clips = {}
         clips_to_translate = {}
-        clip_all_silent = {}
-        
         for i in range(1, 11):
             if target_clip and target_clip != "base" and str(i) != target_clip:
                 continue
-                
-            if data.get(f"c{i}_locked", False):
+            if data.get(f"c{i}_locked", False) or not data.get(f"c{i}_enabled", False):
                 continue
-                
-            if data.get(f"c{i}_enabled", False):
-                clip_text_parts = []
-                enabled_shot_count = 0
-                silent_shot_count = 0
-                
-                for j in range(1, 5):
-                    if data.get(f"c{i}_s{j}_enabled", False):
-                        enabled_shot_count += 1
-                        time_val = data.get(f"c{i}_s{j}_time", "").strip()
-                        time_norm = normalize_time_expression(time_val)
-                        action = data.get(f"c{i}_s{j}_action", "").strip()
-                        dialogue = data.get(f"c{i}_s{j}_dialogue", "").strip()
-                        speaker = data.get(f"c{i}_s{j}_speaker", "None")
 
-                        shot_text = f"[Shot {j} | {time_norm}]\n{action}"
-                        
-                        if speaker in ("None", "セリフなし") or not dialogue.strip():
-                            silent_shot_count += 1
-                            shot_text += "\n" + silence_shot_text(action)
-                        else:
-                            lines = [l.strip() for l in dialogue.split("\n") if l.strip()]
-                            for line in lines:
-                                dia = line
-                                dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
-                                dia = re.sub(r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*", "", dia, flags=re.IGNORECASE)
-                                dia = re.sub(r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE).strip().strip('"').strip("'")
-                                if dia:
-                                    shot_text += f"\n{speaker}: <d>[Japanese] {dia} </d>"
-                        clip_text_parts.append(shot_text)
-                
-                clip_all_silent[i] = enabled_shot_count > 0 and silent_shot_count == enabled_shot_count
-                txt = "\n\n".join(clip_text_parts)
-                manual_prompt = data.get(f"c{i}_prompt", "").strip()
-                if manual_prompt and not txt:
-                    txt = manual_prompt
+            shots = _h3_clip_shots(data, i)
+            manual = data.get(f"c{i}_prompt", "").strip() if not shots else ""
+            if not shots and not manual:
+                continue
+            clips[i] = (shots, manual)
+            for j, (_, action, _, _) in shots.items():
+                if contains_japanese(action):
+                    clips_to_translate[f"{i}_shot_{j}"] = action
+            if contains_japanese(manual):
+                clips_to_translate[str(i)] = manual
 
-                if txt:
-                    if enabled_shot_count > 0 and silent_shot_count == enabled_shot_count:
-                        silent_clip_cmd = "Do not continue, extend, imitate, or infer any human voice or vocalization from the incoming audio context. All characters remain non-vocal throughout this continuation. No speech, dialogue, chatter, whispering, mumbling, babbling, laughter, giggling, humming, grunts, acknowledgements, or unintelligible vocal sounds. Preserve non-vocal ambience, sound effects, and music.\n\n"
-                        txt = silent_clip_cmd + txt
-
-                    if contains_japanese(txt):
-                        clips_to_translate[i] = txt
-                    else:
-                        clip_prompts_out[i] = txt
-                        
+        translated = {}
         if clips_to_translate:
             translated = await asyncio.to_thread(translate_clip_texts, clips_to_translate, data)
-            for k, v in translated.items():
-                clip_prompts_out[k] = v
             if data.get("llm_provider") == "Ollama (Local)":
                 await asyncio.to_thread(unload_ollama_vram, data.get("llm_model", "qwen2.5:7b-instruct-q5_K_M"))
-                
-        
-        
-        if h3_generation_mode(data) in _H3_BASE_MODES:
-            base_definitions = _h3_base_subjects(data)
-            clip_prompts_out = {
-                number: _h3_base_resolve_subjects(value, base_definitions)
-                for number, value in clip_prompts_out.items()
-            }
+
+        base_definitions = _h3_base_subjects(data) if mode in _H3_BASE_MODES else None
 
         final_clip_prompts = {}
-        for i in range(1, 11):
-            if target_clip and target_clip != "base" and str(i) != target_clip:
-                continue
-            if data.get(f"c{i}_locked", False):
-                continue
+        for i, (shots, manual) in clips.items():
+            actions = {j: translated[f"{i}_shot_{j}"] for j in shots if f"{i}_shot_{j}" in translated}
+            txt, all_silent, subject_section = _h3_render_clip_shots(
+                shots, actions, mode=mode, inputs=data,
+                base_prompt=prompt_result or data.get("custom_prompt", ""),
+            )
+            if not shots:
+                txt = translated.get(str(i), manual)
+            if base_definitions is not None:
+                txt = _h3_base_resolve_subjects(txt, base_definitions)
+            final_clip_prompts[str(i)] = _h3_finalize_clip_prompt(
+                txt, mode, data.get(f"c{i}_continue", True),
+                data.get(f"c{i}_link_next", False), all_silent, subject_section=subject_section,
+            )
 
-            txt = clip_prompts_out.get(i, "").strip()
-            if txt:
-                auto_data_str = data.get("auto_data", "{}")
-                try:
-                    auto_data = json.loads(auto_data_str)
-                except:
-                    auto_data = {}
-
-                if auto_data.get("enabled", False):
-                    do_continue = True
-                    link_next = True
-                else:
-                    do_continue = data.get(f"c{i}_continue", True)
-                    link_next = data.get(f"c{i}_link_next", False)
-                
-                if do_continue:
-                    txt = (_H3_BASE_CONTINUATION if h3_generation_mode(kwargs) in _H3_BASE_MODES else "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, camera trajectory, facial state, lighting, environment, object state, voice, ambience, and timing. Connected reference images are optional; use them only to preserve stable subject identity and appearance beneath that incoming state.\n\n") + txt
-                
-                if link_next:
-                    if clip_all_silent.get(i, False):
-                        txt += "\n\nContinue the exact motion and existing non-vocal environmental sound already in progress, then develop the next action naturally. Preserve the silence: do not add or continue any human voice or speech-like vocalization. [DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
-                    else:
-                        txt += "\n\nContinue the exact motion and sound already in progress, then develop the next action naturally. [DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
-                    
-                final_clip_prompts[str(i)] = txt
-                
         return web.json_response({
             "success": True, 
             "prompt": prompt_result,
@@ -3721,7 +4044,7 @@ class H3PromptDirectorGUI:
                 "ambient_sound": ("STRING", {"multiline": True, "default": ""}),
                 "bgm": ("STRING", {"multiline": True, "default": ""}),
                 "timeline_data": ("STRING", {"default": '{"items":[]}'}),
-                "auto_data": ("STRING", {"default": '{"enabled":false, "directorMode":"detailed", "overwrite":false, "noClips":false, "chars":["S1"], "duration":5, "clipCount":1, "story":""}'}),
+                "auto_data": ("STRING", {"default": '{"directorMode":"detailed", "overwrite":false, "chars":["S1"], "duration":5, "story":""}'}),
                 "clips_data_json": ("STRING", {"default": "{}"}),
                 
                 "char1_enabled": ("BOOLEAN", {"default": True}),
@@ -3834,56 +4157,24 @@ class H3PromptDirectorGUI:
         except:
             parsed = {}
             
+        generation_mode = h3_generation_mode(kwargs)
         if not parsed:
             for i in range(1, 11):
-                if kwargs.get(f"c{i}_enabled", False):
-                    clip_text_parts = []
-                    enabled_shot_count = 0
-                    silent_shot_count = 0
-                    
-                    for j in range(1, 5):
-                        if kwargs.get(f"c{i}_s{j}_enabled", False):
-                            enabled_shot_count += 1
-                            time_val = kwargs.get(f"c{i}_s{j}_time", "").strip()
-                            time_norm = normalize_time_expression(time_val)
-                            action = kwargs.get(f"c{i}_s{j}_action", "").strip()
-                            dialogue = kwargs.get(f"c{i}_s{j}_dialogue", "").strip()
-                            speaker = kwargs.get(f"c{i}_s{j}_speaker", "None")
-
-                            shot_text = f"[Shot {j} | {time_norm}]\n{action}"
-                            
-                            if speaker in ("None", "セリフなし") or not dialogue.strip():
-                                silent_shot_count += 1
-                                shot_text += "\n" + silence_shot_text(action)
-                            else:
-                                lines = [l.strip() for l in dialogue.split("\n") if l.strip()]
-                                for line in lines:
-                                    dia = line
-                                    dia = re.sub(r"^S\d+:\s*", "", dia, flags=re.IGNORECASE)
-                                    dia = re.sub(r"^(?:<d>|\[d\])?(?:\s*\[Japanese\])?\s*", "", dia, flags=re.IGNORECASE)
-                                    dia = re.sub(r"\s*(?:<\/d>|\[\/d\])?$", "", dia, flags=re.IGNORECASE).strip().strip('"').strip("'")
-                                    if dia:
-                                        shot_text += f"\n{speaker}: <d>[Japanese] {dia} </d>"
-                            clip_text_parts.append(shot_text)
-                    
-                    txt = "\n\n".join(clip_text_parts)
-                    manual_prompt = kwargs.get(f"c{i}_prompt", "").strip()
-                    if manual_prompt and not txt:
-                        txt = manual_prompt
-
-                    if txt:
-                        if enabled_shot_count > 0 and silent_shot_count == enabled_shot_count:
-                            silent_clip_cmd = "Do not continue, extend, imitate, or infer any human voice or vocalization from the incoming audio context. All characters remain non-vocal throughout this continuation. No speech, dialogue, chatter, whispering, mumbling, babbling, laughter, giggling, humming, grunts, acknowledgements, or unintelligible vocal sounds. Preserve non-vocal ambience, sound effects, and music.\n\n"
-                            txt = silent_clip_cmd + txt
-
-                        if kwargs.get(f"c{i}_continue", True):
-                            txt = (_H3_BASE_CONTINUATION if h3_generation_mode(data) in _H3_BASE_MODES else "Continue the existing scene from the previous generated H3 clip with no cut, reset, or re-establishment. The incoming protected H3 audiovisual latent prefix is authoritative for current pose, motion, camera trajectory, facial state, lighting, environment, object state, voice, ambience, and timing. Connected reference images are optional; use them only to preserve stable subject identity and appearance beneath that incoming state.\n\n") + txt
-                        if kwargs.get(f"c{i}_link_next", False):
-                            if enabled_shot_count > 0 and silent_shot_count == enabled_shot_count:
-                                txt += "\n\nContinue the exact motion and existing non-vocal environmental sound already in progress, then develop the next action naturally. Preserve the silence: do not add or continue any human voice or speech-like vocalization. [DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
-                            else:
-                                txt += "\n\nContinue the exact motion and sound already in progress, then develop the next action naturally. [DESCRIBE WHAT HAPPENS NEXT; DO NOT RESTART FROM REST.]"
-                        parsed[str(i)] = txt
+                if not kwargs.get(f"c{i}_enabled", False):
+                    continue
+                shots = _h3_clip_shots(kwargs, i)
+                to_translate = {slot: action for slot, (_, action, _, events) in shots.items()
+                                if events and contains_japanese(action)}
+                actions = translate_clip_texts(to_translate, kwargs) if to_translate else {}
+                txt, all_silent, subject_section = _h3_render_clip_shots(
+                    shots, actions, mode=generation_mode, inputs=kwargs, base_prompt=prompt_result)
+                if not shots:
+                    txt = kwargs.get(f"c{i}_prompt", "").strip()
+                if txt:
+                    parsed[str(i)] = _h3_finalize_clip_prompt(
+                        txt, generation_mode, kwargs.get(f"c{i}_continue", True),
+                        kwargs.get(f"c{i}_link_next", False), all_silent, subject_section=subject_section,
+                    )
             clip_prompt_json = json.dumps(parsed, ensure_ascii=False)
 
         images, keyframes, videos, audios = {}, {}, {}, {}
@@ -3933,7 +4224,6 @@ class H3PromptDirectorGUI:
 
         
         
-        generation_mode = h3_generation_mode(kwargs)
         if generation_mode in _H3_BASE_MODES:
             images = {}
             videos = {}
@@ -3960,7 +4250,7 @@ class H3PromptDirectorGUI:
         except:
             clips_data = {}
 
-        if h3_generation_mode(kwargs) in _H3_BASE_MODES:
+        if generation_mode in _H3_BASE_MODES:
             definitions = _h3_base_subjects(kwargs)
             parsed = {str(key): _h3_base_resolve_subjects(value, definitions)
                       for key, value in parsed.items() if isinstance(value, str)}
