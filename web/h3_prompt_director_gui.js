@@ -26,13 +26,57 @@ function h3ProtectDialogue(value) {
     return { text, tokens };
 }
 
-function h3RestoreDialogue(text, tokens) {
-    const expected = tokens.map((_, i) => `H3POSEDSPEECH${i + 1}END`);
-    if (JSON.stringify(text.match(h3DialogueAnchor()) || []) !== JSON.stringify(expected)) {
-        throw new Error("セリフの位置を修正案から復元できませんでした。");
+function h3RestoreDialogue(text, tokens, originalProtected = "") {
+    if (!tokens.length) return text;
+    const anchors = tokens.map((_, i) => `H3POSEDSPEECH${i + 1}END`);
+    // Models sometimes add spaces or Markdown around the protected markers.
+    const flexible = /H3\\s*POSED\\s*SPEECH\\s*([0-9]+)\\s*END/gi;
+    const normalized = String(text || "").replace(flexible, (_, n) =>
+        `H3POSEDSPEECH${Number(n)}END`);
+    const found = normalized.match(h3DialogueAnchor()) || [];
+    if (JSON.stringify(found) === JSON.stringify(anchors)) {
+        let index = 0;
+        return normalized.replace(h3DialogueAnchor(), () => tokens[index++]);
     }
-    let index = 0;
-    return text.replace(h3DialogueAnchor(), () => tokens[index++]);
+    // Never silently reorder dialogue or assign it to a different speaker.
+    // If the LLM removed/duplicated markers, preserve the original dialogue
+    // positions and revise only the surrounding prose by segment.
+    const source = String(originalProtected || "");
+    const sourceParts = source.split(h3DialogueAnchor());
+    if (sourceParts.length !== tokens.length + 1) {
+        throw new Error("元のセリフ位置を確認できませんでした。");
+    }
+    // Reject foreign or out-of-range markers instead of leaking them into a shot.
+    const clean = normalized.replace(h3DialogueAnchor(), "").trim();
+    if (!clean) throw new Error("修正案にショット本文がありません。");
+    const weights = sourceParts.map(part => Math.max(part.trim().length, 1));
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    const boundaries = [];
+    let cumulative = 0;
+    for (let i = 0; i < tokens.length; i++) {
+        cumulative += weights[i];
+        const desired = Math.round(clean.length * cumulative / total);
+        // Prefer a sentence or paragraph boundary near the original position.
+        let boundary = desired;
+        const window = Math.min(100, Math.max(24, Math.round(clean.length * 0.12)));
+        const candidates = [];
+        for (let j = Math.max(boundaries.at(-1) ?? 0, desired - window);
+             j <= Math.min(clean.length, desired + window); j++) {
+            if (/[。！？\\n]/.test(clean[j - 1] || "")) candidates.push(j);
+        }
+        if (candidates.length) boundary = candidates.reduce((best, pos) =>
+            Math.abs(pos - desired) < Math.abs(best - desired) ? pos : best);
+        boundaries.push(Math.max(boundaries.at(-1) ?? 0, boundary));
+    }
+    const revisedParts = [];
+    let start = 0;
+    for (const boundary of boundaries) {
+        revisedParts.push(clean.slice(start, boundary).trim());
+        start = boundary;
+    }
+    revisedParts.push(clean.slice(start).trim());
+    return revisedParts.map((part, i) => part + (i < tokens.length ?
+        `\\n${tokens[i]}\\n` : "")).join("\\n").trim();
 }
 
 function h3ReadableShot(value) {
@@ -2354,7 +2398,7 @@ app.registerExtension({
                             for (const change of res.changes) {
                                 if (change.field === 'action') {
                                     const anchors = h3ProtectDialogue(before[change.shot - 1].action);
-                                    change.value = h3RestoreDialogue(await directorConvert(change.value), anchors.tokens);
+                                    change.value = h3RestoreDialogue(await directorConvert(change.value), anchors.tokens, anchors.text);
                                 }
                                 changes.push(change);
                             }
