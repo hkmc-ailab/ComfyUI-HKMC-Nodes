@@ -4,6 +4,8 @@ import json
 import torch
 import folder_paths
 import nodes
+from aiohttp import web
+from server import PromptServer
 
 class AnimaDatasetStacker:
     """
@@ -82,6 +84,21 @@ class AnimaDatasetStacker:
         "tan complexion", "tanned complexion", "tan", "tanned"
     ]
 
+    LEGACY_TAG_GROUPS = (
+        ("head", "face", ("HEAD", "FACE")),
+        ("head", "hair", ("HAIR",)),
+        ("upper", "upper", ("UPPER",)),
+        ("upper", "body", ("BODY", "CHEST")),
+        ("waist", "waist", ("WAIST", "BELT")),
+        ("lower", "lower", ("LOWER", "SKIRT", "PANTS")),
+        ("legs", "legs", ("LEGS", "FEET", "SHOES")),
+    )
+
+    CHARACTER_CATEGORIES = {
+        "identity", "face", "hair", "body", "upper", "waist", "lower",
+        "legs", "hands", "accessories", "other",
+    }
+
     @classmethod
     def get_character_files(cls):
         base_dir = os.path.join(os.path.dirname(__file__), "characters")
@@ -159,7 +176,7 @@ class AnimaDatasetStacker:
         return ", ".join(filtered)
 
     def parse_character(self, preset_name):
-        if preset_name == "None":
+        if preset_name == "None" or preset_name not in self.get_character_files():
             return {}
         char_dir = os.path.join(os.path.dirname(__file__), "characters")
         cands = [f"Anima_{preset_name}.json", f"anima_{preset_name}.json", f"{preset_name}.json", f"Anima_{preset_name}.txt", f"anima_{preset_name}.txt", f"{preset_name}.txt"]
@@ -190,6 +207,25 @@ class AnimaDatasetStacker:
             else:
                 sections.setdefault(curr, []).append(ls)
         return {k: ", ".join(v) for k, v in sections.items()}
+
+    def character_tag_records(self, parsed_char):
+        if "__v2__" in parsed_char:
+            for index, row in enumerate(parsed_char["__v2__"]):
+                tag = row["text"].strip()
+                category = row.get("category", "other")
+                if tag and isinstance(category, str) and category in self.CHARACTER_CATEGORIES:
+                    yield {"key": f"{index}:{tag}", "text": tag, "category": category}
+            return
+
+        for part, category, sections in self.LEGACY_TAG_GROUPS:
+            for section in sections:
+                for index, text in enumerate(parsed_char.get(section, "").split(",")):
+                    tag = text.strip()
+                    if tag:
+                        yield {
+                            "key": f"{section}:{index}:{tag}", "text": tag,
+                            "category": category, "part": part,
+                        }
 
     @staticmethod
     def is_expression(tag):
@@ -223,7 +259,9 @@ class AnimaDatasetStacker:
 
         try:
             sel = json.loads(selection_json)
-        except Exception:
+        except (TypeError, ValueError):
+            sel = {}
+        if not isinstance(sel, dict):
             sel = {}
 
         selected_tasks = []
@@ -255,6 +293,13 @@ class AnimaDatasetStacker:
 
         total_count = len(selected_tasks)
         parsed_char = self.parse_character(character_preset)
+        disabled_by_preset = sel.get("disabled_tags", {})
+        disabled = disabled_by_preset.get(character_preset, []) if isinstance(disabled_by_preset, dict) else []
+        disabled_keys = {key for key in disabled if isinstance(key, str)} if isinstance(disabled, list) else set()
+        selected_tags = [
+            row for row in self.character_tag_records(parsed_char)
+            if row["key"] not in disabled_keys
+        ]
 
         def build_one(shot_key, angle_info, expr_info):
             is_back = angle_info["is_back"]
@@ -270,14 +315,10 @@ class AnimaDatasetStacker:
                 }[shot_key]
                 if shot_key == "face":
                     categories = categories | {"upper", "accessories"}
-                for row in parsed_char["__v2__"]:
-                    category = row.get("category", "other")
-                    tag = row["text"].strip()
-                    if not tag:
-                        continue
+                for row in selected_tags:
+                    category = row["category"]
+                    tag = row["text"]
                     if category not in categories:
-                        continue
-                    if category in ("expression", "pose"):
                         continue
                     if is_back and self.is_front_only(tag):
                         continue
@@ -297,26 +338,18 @@ class AnimaDatasetStacker:
                         continue
                     parts.append(tag)
             else:
-                char_map = [
-                    (self.SHOTS[shot_key]["parts"]["head"], ["HEAD", "FACE", "HAIR"]),
-                    (self.SHOTS[shot_key]["parts"]["upper"] and not (is_back and shot_key == "face"), ["UPPER", "BODY", "CHEST"]),
-                    (self.SHOTS[shot_key]["parts"]["waist"] and not (is_back and shot_key == "face"), ["WAIST", "BELT"]),
-                    (self.SHOTS[shot_key]["parts"]["lower"] and not (is_back and shot_key == "face"), ["LOWER", "SKIRT", "PANTS"]),
-                    (self.SHOTS[shot_key]["parts"]["legs"] and not (is_back and shot_key == "face"), ["LEGS", "FEET", "SHOES"]),
-                ]
-                for enabled, keys in char_map:
-                    if enabled:
-                        for key in keys:
-                            if key in parsed_char:
-                                for tag in parsed_char[key].split(","):
-                                    tag = tag.strip()
-                                    if not tag:
-                                        continue
-                                    if expr_info and self.is_expression(tag):
-                                                        continue
-                                    if is_back and self.is_front_only(tag):
-                                                        continue
-                                    parts.append(tag)
+                for row in selected_tags:
+                    part = row["part"]
+                    tag = row["text"]
+                    if not self.SHOTS[shot_key]["parts"][part]:
+                        continue
+                    if is_back and shot_key == "face" and part != "head":
+                        continue
+                    if expr_info and self.is_expression(tag):
+                        continue
+                    if is_back and self.is_front_only(tag):
+                        continue
+                    parts.append(tag)
             if is_back:
                 parts.extend(["rear view", "character facing away from viewer", "back of head visible", "face occluded"])
             unique = []
@@ -359,6 +392,24 @@ class AnimaDatasetStacker:
         full_neg = ", ".join(neg_parts)
         pos_text = build_one(shot_key, angle_info, expr_info)
         return (model, clip, self.encode(clip, pos_text), self.encode(clip, full_neg), pos_text)
+
+
+@PromptServer.instance.routes.get("/anima/stacker/character_tags")
+async def anima_stacker_character_tags(request):
+    preset = request.query.get("preset", "None")
+    stacker = AnimaDatasetStacker()
+    try:
+        if preset not in stacker.get_character_files():
+            return web.json_response({"error": "プリセットが見つかりません"}, status=404)
+        parsed = stacker.parse_character(preset)
+        tags = [
+            {"key": row["key"], "text": row["text"], "category": row["category"]}
+            for row in stacker.character_tag_records(parsed)
+        ]
+    except (OSError, UnicodeError) as exc:
+        print(f"[AnimaDatasetStacker] Failed to read preset: {exc}")
+        return web.json_response({"error": "プリセットを読み込めませんでした"}, status=400)
+    return web.json_response({"preset": preset, "tags": tags}, headers={"Cache-Control": "no-store"})
 
 
 NODE_CLASS_MAPPINGS = {
