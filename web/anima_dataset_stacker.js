@@ -1,4 +1,112 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+
+const tagCategories = [
+    ["identity", "基本属性"], ["face", "顔・瞳"], ["hair", "髪"],
+    ["body", "身体・耳・尻尾"], ["upper", "上半身衣装"], ["waist", "腰・ベルト"],
+    ["lower", "下半身衣装"], ["legs", "脚・靴"], ["hands", "手・手袋"],
+    ["accessories", "装飾・装備"], ["other", "その他"],
+];
+
+function makeElement(type, text) {
+    const element = document.createElement(type);
+    if (text !== undefined) element.textContent = text;
+    if (type === "button") element.type = "button";
+    return element;
+}
+
+function renderTagOptions(panel, tags, disabled, commit) {
+    panel.replaceChildren();
+    if (!tags.length) {
+        panel.textContent = "選択できるプリセットタグがありません。";
+        return;
+    }
+
+    const toolbar = makeElement("div");
+    toolbar.style.cssText = "display:flex; align-items:center; gap:6px; margin-bottom:6px;";
+    const all = makeElement("button", "全選択");
+    const clear = makeElement("button", "全解除");
+    all.style.cssText = "background:#1d2229;color:#8bb4dc;border:1px solid #3a506b;border-radius:5px;font-size:10px;font-weight:600;padding:4px 7px;cursor:pointer;";
+    clear.style.cssText = "background:#261d20;color:#e07878;border:1px solid #6b3a3a;border-radius:5px;font-size:10px;font-weight:600;padding:4px 7px;cursor:pointer;";
+    const total = makeElement("span");
+    total.style.marginLeft = "auto";
+    toolbar.append(all, clear, total);
+    panel.append(toolbar);
+
+    const groups = [];
+    for (const [category, label] of tagCategories) {
+        const items = tags.filter(tag => tag.category === category);
+        if (!items.length) continue;
+        const group = makeElement("div");
+        group.style.cssText = "margin-bottom:4px; border:1px solid #333; border-radius:4px; padding:4px;";
+        const header = makeElement("div");
+        header.style.cssText = "display:flex; align-items:center; gap:6px;";
+        const groupLabel = makeElement("label");
+        groupLabel.style.cssText = "display:flex; align-items:center; gap:4px; flex:1;";
+        const checkbox = makeElement("input");
+        checkbox.type = "checkbox";
+        groupLabel.append(checkbox, makeElement("span", label));
+        const count = makeElement("span");
+        const expand = makeElement("button", "▼");
+        expand.style.cssText = "display:flex;align-items:center;justify-content:center;flex:0 0 27px;width:27px;height:23px;box-sizing:border-box;background:#22262b;border:1px solid #626b76;border-radius:5px;color:#fff;font-family:Arial,sans-serif;font-size:10px;font-weight:700;line-height:1;cursor:pointer;";
+        expand.onmouseenter = () => { expand.style.background = "#373d44"; expand.style.borderColor = "#f0f0f0"; };
+        expand.onmouseleave = () => { expand.style.background = "#22262b"; expand.style.borderColor = "#626b76"; };
+        expand.setAttribute("aria-label", label + "の個別タグ");
+        expand.setAttribute("aria-expanded", "false");
+        header.append(groupLabel, count, expand);
+        group.append(header);
+
+        const list = makeElement("div");
+        list.hidden = true;
+        const toggles = items.map(item => {
+            const row = makeElement("label");
+            row.style.cssText = "display:flex; align-items:baseline; gap:4px; margin:2px 0 0 12px; overflow-wrap:anywhere;";
+            const toggle = makeElement("input");
+            toggle.type = "checkbox";
+            toggle.onchange = () => change([item], toggle.checked);
+            row.append(toggle, makeElement("span", item.text));
+            list.append(row);
+            return toggle;
+        });
+        expand.onclick = () => {
+            list.hidden = !list.hidden;
+            expand.textContent = list.hidden ? "▼" : "▲";
+            expand.setAttribute("aria-expanded", String(!list.hidden));
+        };
+        checkbox.onchange = () => change(items, checkbox.checked);
+        group.append(list);
+        panel.append(group);
+        groups.push({ items, toggles, checkbox, count });
+    }
+
+    const refresh = () => {
+        let enabled = 0;
+        for (const { items, toggles, checkbox, count } of groups) {
+            let selected = 0;
+            items.forEach((item, i) => {
+                const checked = !disabled.has(item.key);
+                toggles[i].checked = checked;
+                if (checked) selected++;
+            });
+            checkbox.checked = selected === items.length;
+            checkbox.indeterminate = selected > 0 && selected < items.length;
+            count.textContent = `${selected}/${items.length}`;
+            enabled += selected;
+        }
+        total.textContent = `有効なタグ ${enabled} / ${tags.length}`;
+    };
+    const change = (items, checked) => {
+        for (const item of items) {
+            if (checked) disabled.delete(item.key);
+            else disabled.add(item.key);
+        }
+        commit(tags.filter(tag => disabled.has(tag.key)).map(tag => tag.key));
+        refresh();
+    };
+    all.onclick = () => change(tags, true);
+    clear.onclick = () => change(tags, false);
+    refresh();
+}
 
 if (!window._anima_stacker_hooked) {
     window._anima_stacker_hooked = true;
@@ -68,20 +176,26 @@ app.registerExtension({
                     { id: "surprised", label: "驚く" }
                 ];
 
-                let state = {
-                    full: {},
-                    upper: {},
-                    face: {},
-                    face_expressions: {}
+                const shotTabs = ["full", "upper", "face"];
+                const presetWidget = this.widgets.find(w => w.name === "character_preset");
+                const selWidget = this.widgets.find(w => w.name === "selection_json");
+                const isRecord = value => value && typeof value === "object" && !Array.isArray(value);
+                const readSelection = () => {
+                    let saved;
+                    try {
+                        saved = JSON.parse(selWidget?.value);
+                    } catch {
+                        saved = null;
+                    }
+                    const selection = {};
+                    for (const key of [...shotTabs, "face_expressions"]) {
+                        const items = key === "face_expressions" ? expressions : angles;
+                        selection[key] = Object.fromEntries(items.map(({ id }) => [id, !!saved?.[key]?.[id]]));
+                    }
+                    selection.disabled_tags = isRecord(saved?.disabled_tags) ? saved.disabled_tags : {};
+                    return selection;
                 };
-                angles.forEach(a => {
-                    state.full[a.id] = false;
-                    state.upper[a.id] = false;
-                    state.face[a.id] = false;
-                });
-                expressions.forEach(e => {
-                    state.face_expressions[e.id] = false;
-                });
+                let state = readSelection();
 
                 const idxWidget = this.widgets.find(w => w.name === "current_index");
                 if (idxWidget) {
@@ -90,21 +204,10 @@ app.registerExtension({
                     idxWidget.draw = () => {};
                 }
 
-                const selWidget = this.widgets.find(w => w.name === "selection_json");
                 if (selWidget) {
                     selWidget.type = "hidden";
                     selWidget.computeSize = () => [0, -4];
                     selWidget.draw = () => {};
-                    try {
-                        const saved = JSON.parse(selWidget.value);
-                        if (saved.full && Object.keys(saved.full).length > 0) {
-                            state = { ...state, ...saved };
-                            if (!state.face_expressions) {
-                                state.face_expressions = {};
-                                expressions.forEach(e => state.face_expressions[e.id] = false);
-                            }
-                        }
-                    } catch (e) {}
                 }
 
                 const syncToWidget = () => {
@@ -113,8 +216,25 @@ app.registerExtension({
                         if (selWidget.callback) selWidget.callback(selWidget.value);
                     }
                     updateBadge();
+                    this.setDirtyCanvas?.(true, false);
                 };
 
+                const negativeWidget = this.widgets?.find(w => w.name === "negative_prompt");
+                const negativeOriginalCompute = negativeWidget?.computeSize?.bind(negativeWidget);
+                let freedNegativeHeight = 35;
+                if (negativeWidget && negativeOriginalCompute) {
+                    const originalSize = negativeOriginalCompute(480);
+                    const originalHeight = Array.isArray(originalSize) ? originalSize[1] : 105;
+                    if (Number.isFinite(originalHeight) && originalHeight > 0) {
+                        const reducedHeight = Math.max(55, Math.round(originalHeight * 2 / 3));
+                        freedNegativeHeight = Math.max(0, originalHeight - reducedHeight);
+                        negativeWidget.computeSize = width => {
+                            const size = negativeOriginalCompute(width);
+                            return [size[0], Math.max(55, Math.round(size[1] * 2 / 3))];
+                        };
+                    }
+                }
+                const panelHeight = 185 + freedNegativeHeight;
                 const container = document.createElement("div");
                 container.style.cssText = `
                     display: flex;
@@ -127,7 +247,7 @@ app.registerExtension({
                     margin: 4px 0 2px 0;
                     font-family: sans-serif;
                     width: 100%;
-                    max-height: 185px;
+                    max-height: ${panelHeight}px;
                     overflow-y: auto;
                     overflow-x: hidden;
                     box-sizing: border-box;
@@ -137,12 +257,12 @@ app.registerExtension({
                 tabBar.style.cssText = "display: flex; gap: 4px; border-bottom: 1px solid #282828; padding-bottom: 6px; width: 100%; box-sizing: border-box; flex-shrink: 0;";
                 
                 const tabs = [
-                    { id: "all", label: "全て (42)" },
                     { id: "full", label: "全身 (14)" },
                     { id: "upper", label: "上半身 (14)" },
-                    { id: "face", label: "顔 (14)" }
+                    { id: "face", label: "顔 (14)" },
+                    { id: "tags", label: "タグ指定" }
                 ];
-                let currentTab = "all";
+                let currentTab = "full";
 
                 const tabBtns = {};
                 tabs.forEach(t => {
@@ -157,10 +277,9 @@ app.registerExtension({
                             b.style.background = (k === currentTab) ? "#007acc" : "#222";
                             b.style.color = (k === currentTab) ? "#fff" : "#aaa";
                         });
-                        if (currentTab === "face") {
-                            exprContainer.style.display = "flex";
-                        } else {
-                            exprContainer.style.display = "none";
+                        if (currentTab === "tags") {
+                            loadTags();
+                            return;
                         }
                         renderButtons();
                     };
@@ -180,11 +299,7 @@ app.registerExtension({
                 btnSelectAll.style.cssText = "background: #222; color: #8bb4dc; border: 1px solid #3a506b; border-radius: 4px; font-size: 9px; font-weight: bold; padding: 2px 6px; cursor: pointer;";
                 btnSelectAll.onclick = (e) => {
                     e.preventDefault();
-                    if (currentTab === "all") {
-                        ["full", "upper", "face"].forEach(k => angles.forEach(a => state[k][a.id] = true));
-                    } else {
-                        angles.forEach(a => state[currentTab][a.id] = true);
-                    }
+                    angles.forEach(a => state[currentTab][a.id] = true);
                     syncToWidget();
                     renderButtons();
                 };
@@ -195,11 +310,7 @@ app.registerExtension({
                 btnClearAll.style.cssText = "background: #222; color: #d66; border: 1px solid #6b3a3a; border-radius: 4px; font-size: 9px; font-weight: bold; padding: 2px 6px; cursor: pointer;";
                 btnClearAll.onclick = (e) => {
                     e.preventDefault();
-                    if (currentTab === "all") {
-                        ["full", "upper", "face"].forEach(k => angles.forEach(a => state[k][a.id] = false));
-                    } else {
-                        angles.forEach(a => state[currentTab][a.id] = false);
-                    }
+                    angles.forEach(a => state[currentTab][a.id] = false);
                     syncToWidget();
                     renderButtons();
                 };
@@ -291,14 +402,16 @@ app.registerExtension({
                 exprContainer.append(exprHeader, exprGrid);
 
                 const renderButtons = () => {
+                    const showTags = currentTab === "tags";
+                    ctrlBar.style.display = showTags ? "none" : "flex";
+                    grid.style.display = showTags ? "none" : "grid";
+                    exprContainer.style.display = currentTab === "face" ? "flex" : "none";
+                    tagPanel.hidden = !showTags;
+                    if (showTags) return;
+
                     grid.innerHTML = "";
                     angles.forEach(a => {
-                        let isChecked = false;
-                        if (currentTab === "all") {
-                            isChecked = state.full[a.id] && state.upper[a.id] && state.face[a.id];
-                        } else {
-                            isChecked = state[currentTab][a.id];
-                        }
+                        const isChecked = state[currentTab][a.id];
 
                         const abtn = document.createElement("button");
                         abtn.type = "button";
@@ -307,12 +420,7 @@ app.registerExtension({
                         
                         abtn.onclick = (e) => {
                             e.preventDefault();
-                            const next = !isChecked;
-                            if (currentTab === "all") {
-                                ["full", "upper", "face"].forEach(k => state[k][a.id] = next);
-                            } else {
-                                state[currentTab][a.id] = next;
-                            }
+                            state[currentTab][a.id] = !isChecked;
                             syncToWidget();
                             renderButtons();
                         };
@@ -337,14 +445,70 @@ app.registerExtension({
                     });
                 };
 
-                container.append(tabBar, ctrlBar, grid, exprContainer);
+                const tagPanel = makeElement("div");
+                tagPanel.style.cssText = "color:#c0d1e3; font-size:11px; min-height:0; overflow-y:auto;";
+                let tagRequest = 0;
+                const loadTags = async () => {
+                    const request = ++tagRequest;
+                    const preset = String(presetWidget?.value ?? "None");
+                    renderButtons();
+                    tagPanel.scrollTop = 0;
+                    if (preset === "None") {
+                        tagPanel.textContent = "キャラクタープリセットを選択してください。";
+                        return;
+                    }
+                    tagPanel.textContent = "プリセットのタグを読み込み中…";
+                    const isCurrent = () => request === tagRequest && presetWidget?.value === preset;
+                    try {
+                        const url = `/anima/stacker/character_tags?preset=${encodeURIComponent(preset)}`;
+                        const response = await api.fetchApi(url, { cache: "no-store" });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                        if (data.preset !== preset || !Array.isArray(data.tags)) {
+                            throw new Error("プリセットの読み込み結果が不正です");
+                        }
+                        if (!isCurrent()) return;
+                        const saved = Object.hasOwn(state.disabled_tags, preset) ? state.disabled_tags[preset] : [];
+                        const disabled = new Set(Array.isArray(saved) ? saved : []);
+                        renderTagOptions(tagPanel, data.tags, disabled, keys => {
+                            if (!isCurrent()) return;
+                            if (keys.length) state.disabled_tags = { ...state.disabled_tags, [preset]: keys };
+                            else delete state.disabled_tags[preset];
+                            syncToWidget();
+                        });
+                    } catch (error) {
+                        if (!isCurrent()) return;
+                        const retry = makeElement("button", "再読み込み");
+                        retry.onclick = () => loadTags();
+                        tagPanel.replaceChildren(makeElement("div", `読み込み失敗：${error.message}`), retry);
+                    }
+                };
+                if (presetWidget) {
+                    const onPresetChanged = presetWidget.callback;
+                    presetWidget.callback = function () {
+                        const result = onPresetChanged?.apply(this, arguments);
+                        if (currentTab === "tags") loadTags();
+                        return result;
+                    };
+                }
+                const onConfigure = this.onConfigure;
+                this.onConfigure = function () {
+                    const result = onConfigure?.apply(this, arguments);
+                    state = readSelection();
+                    updateBadge();
+                    if (currentTab === "tags") loadTags();
+                    else renderButtons();
+                    return result;
+                };
+
+                container.append(tabBar, ctrlBar, grid, exprContainer, tagPanel);
 
                 const customUiWidget = this.addDOMWidget("dataset_stacker_ui", "custom", container, {
                     serialize: false,
                     hideOnZoom: false,
-                    getHeight: () => 185
+                    getHeight: () => panelHeight
                 });
-                customUiWidget.computeSize = (width) => [width || 480, 185];
+                customUiWidget.computeSize = (width) => [width || 480, panelHeight];
 
                 const spacerDiv = document.createElement("div");
                 spacerDiv.style.cssText = "height: 24px; width: 100%; pointer-events: none;";
@@ -363,7 +527,7 @@ app.registerExtension({
                     }
                 };
 
-                syncToWidget();
+                updateBadge();
                 renderButtons();
                 this.setSize([480, 500]);
             };
