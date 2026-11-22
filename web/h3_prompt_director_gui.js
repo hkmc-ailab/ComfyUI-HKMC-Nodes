@@ -29,7 +29,6 @@ function h3ProtectDialogue(value) {
 function h3RestoreDialogue(text, tokens, originalProtected = "") {
     if (!tokens.length) return text;
     const anchors = tokens.map((_, i) => `H3POSEDSPEECH${i + 1}END`);
-    // Models sometimes add spaces or Markdown around the protected markers.
     const flexible = /H3\\s*POSED\\s*SPEECH\\s*([0-9]+)\\s*END/gi;
     const normalized = String(text || "").replace(flexible, (_, n) =>
         `H3POSEDSPEECH${Number(n)}END`);
@@ -38,15 +37,11 @@ function h3RestoreDialogue(text, tokens, originalProtected = "") {
         let index = 0;
         return normalized.replace(h3DialogueAnchor(), () => tokens[index++]);
     }
-    // Never silently reorder dialogue or assign it to a different speaker.
-    // If the LLM removed/duplicated markers, preserve the original dialogue
-    // positions and revise only the surrounding prose by segment.
     const source = String(originalProtected || "");
     const sourceParts = source.split(h3DialogueAnchor());
     if (sourceParts.length !== tokens.length + 1) {
         throw new Error("元のセリフ位置を確認できませんでした。");
     }
-    // Reject foreign or out-of-range markers instead of leaking them into a shot.
     const clean = normalized.replace(h3DialogueAnchor(), "").trim();
     if (!clean) throw new Error("修正案にショット本文がありません。");
     const weights = sourceParts.map(part => Math.max(part.trim().length, 1));
@@ -56,7 +51,6 @@ function h3RestoreDialogue(text, tokens, originalProtected = "") {
     for (let i = 0; i < tokens.length; i++) {
         cumulative += weights[i];
         const desired = Math.round(clean.length * cumulative / total);
-        // Prefer a sentence or paragraph boundary near the original position.
         let boundary = desired;
         const window = Math.min(100, Math.max(24, Math.round(clean.length * 0.12)));
         const candidates = [];
@@ -736,6 +730,29 @@ function installStudioStyles() {
         }
         .h3-btn-gen-prompt:hover { background: #0088e6; }
         .h3-btn-gen-prompt:active { transform: scale(0.99); }
+        /* Action colors: primary=blue, selection/navigation=green, destructive=red. */
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-select:not(:disabled) {
+            background: #236747; border-color: #398b63; color: #f0fff6;
+        }
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-select:hover:not(:disabled) {
+            background: #2c8058; border-color: #58ab7e;
+        }
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-delete:not(:disabled) {
+            background: #87353d; border-color: #b6535d; color: #fff4f4;
+        }
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-delete:hover:not(:disabled) {
+            background: #a64049; border-color: #d46b75;
+        }
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-primary:not(:disabled) {
+            background: #1767a3; border-color: #4389bd; color: #f4faff;
+        }
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-primary:hover:not(:disabled) {
+            background: #207bbd; border-color: #65a6d7;
+        }
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-select:disabled,
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-delete:disabled,
+        :is(.h3-studio-container, .h3-dialogue-modal) button.h3-action-primary:disabled { opacity: 0.48; cursor: not-allowed; }
+
         .h3-btn-gen-prompt:disabled { background: #2b2b2b; color: #6e7681; cursor: not-allowed; }
 
         .h3-use-prompt-banner {
@@ -1341,6 +1358,34 @@ app.registerExtension({
 
                 const root = document.createElement("div");
                 root.className = "h3-studio-container";
+                const h3ColorActionButton = button => {
+                    if (!(button instanceof HTMLButtonElement)) return;
+                    button.classList.remove("h3-action-select", "h3-action-delete", "h3-action-primary");
+                    if (button.classList.contains("h3-tab-btn") ||
+                        button.classList.contains("h3-collapse-toggle") ||
+                        button.classList.contains("h3-slot-del-btn")) return;
+                    const label = (button.textContent || "").replace(/\s+/g, " ").trim();
+                    if (/削除|消去|クリア|リセット|破棄/.test(label)) button.classList.add("h3-action-delete");
+                    else if (/選択|切替|切り替え|上へ|下へ|追加|挿入|参照|読み込|読込|適用先/.test(label) &&
+                             !/生成|保存|決定|確定/.test(label)) button.classList.add("h3-action-select");
+                    else if (/生成|保存|適用|決定|確定|構築|翻訳|実行|反映|変換|作成|登録/.test(label))
+                        button.classList.add("h3-action-primary");
+                };
+                const h3ColorActionsIn = element => {
+                    if (element.nodeType !== 1) return;
+                    h3ColorActionButton(element);
+                    element.querySelectorAll?.("button").forEach(h3ColorActionButton);
+                };
+                const h3ActionColorObserver = new MutationObserver(records => {
+                    for (const record of records) {
+                        if (record.type === "childList") {
+                            record.addedNodes.forEach(h3ColorActionsIn);
+                            if (record.target instanceof HTMLButtonElement) h3ColorActionButton(record.target);
+                        }
+                    }
+                });
+                h3ActionColorObserver.observe(root, { childList: true, subtree: true });
+
                 h3SubscribeBackground(root);
 
                 const GUI_Y_OFFSET = -14;
@@ -1860,6 +1905,7 @@ app.registerExtension({
                         el.type = handler ? "button" : "submit";
                         el.textContent = title;
                         if (handler) el.onclick = handler;
+                        h3ColorActionButton(el);
                         controls.appendChild(el);
                         return el;
                     };
@@ -2971,7 +3017,7 @@ app.registerExtension({
                             bulkStatus.textContent = "";
                             saveAutoState();
                         };
-                        lblOw.append(chkOw, document.createTextNode("タイムラインのショットを上書きする (必須)"));
+                        lblOw.append(chkOw, document.createTextNode("タイムラインのショットと［演出］の全体のあらすじを上書きする (必須)"));
 
                         const bulkStatus = document.createElement("div");
                         bulkStatus.style.cssText = "font-size:10px;line-height:1.5;color:#aeb7c2;min-height:15px;white-space:pre-wrap;";
@@ -3043,12 +3089,13 @@ app.registerExtension({
 
                         execBtn.onclick = async () => {
                             if (!autoState.overwrite) {
-                                bulkStatus.textContent = "先に『タイムラインのショットを上書きする』にチェックしてください。";
+                                bulkStatus.textContent = "先に上書きのチェックを入れてください。";
                                 bulkStatus.style.color = "#ff9b9b";
                                 chkOw.focus();
                                 return;
                             }
-                            if (!String(autoState.story || "").trim()) {
+                            const synopsis = storyTa.value;
+                            if (!synopsis.trim()) {
                                 bulkStatus.textContent = "『物語・あらすじ・シチュエーション入力』が空です。原案を入力してください。";
                                 bulkStatus.style.color = "#ff9b9b";
                                 storyTa.focus();
@@ -3056,12 +3103,12 @@ app.registerExtension({
                             }
                             execBtn.disabled = true;
                             execBtn.textContent = "⏳ シナリオ考案中... (LLM通信中)";
-                            bulkStatus.textContent = "LLMでショットを考案しています。完了後、タイムラインへ反映します。";
+                            bulkStatus.textContent = "LLMでショットを考案しています。完了後、ショットとあらすじを反映します。";
                             bulkStatus.style.color = "#aeb7c2";
                             saveAutoState();
                             const payload = {};
                             (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
-                            payload.auto_data = JSON.stringify({story: autoState.story, duration: autoState.duration});
+                            payload.auto_data = JSON.stringify({story: synopsis, duration: autoState.duration});
                             const controller = new AbortController();
                             const timeoutId = setTimeout(() => controller.abort(), 600000);
                             try {
@@ -3089,7 +3136,8 @@ app.registerExtension({
                                     }
                                 }
                                 
-                                alert("ベースのシナリオをタイムラインに適用しました。\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
+                                setDirectorWidget("overall_story", synopsis);
+                                alert("ショットを［タイムライン］に、原案を［演出］の全体のあらすじに反映しました。\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
                                 
                                 activeTab = "timeline";
                                 Object.values(tabButtons).forEach(b => b.classList.remove("active"));
@@ -3507,16 +3555,6 @@ app.registerExtension({
                                 };
                                 addAction("↑ 上へ", index === 0, () => move(-1));
                                 addAction("↓ 下へ", index === entries.length - 1, () => move(1));
-                                addAction("試聴中のテイクに差し替え", !pendingTake, () => {
-                                    if (speakerNumber(pendingSpeaker) && pendingSpeaker !== speaker) {
-                                        concatStatus.textContent = "試聴中のテイクと連結リストの話者が異なります。";
-                                        return;
-                                    }
-                                    const updated = entries.slice();
-                                    updated[index] = pendingEntry();
-                                    saveList(speaker, updated);
-                                    concatStatus.textContent = `${index + 1}番目のテイクを差し替えました。`;
-                                });
                                 addAction("削除", false, () => saveList(speaker, entries.filter((_, at) => at !== index)));
                                 row.append(label, player, actions);
                                 takeList.appendChild(row);
@@ -4729,6 +4767,7 @@ app.registerExtension({
                     document.removeEventListener("h3_seeds_updated", onH3SeedsUpdated);
                     if (h3SeedRefreshFrame !== null) cancelAnimationFrame(h3SeedRefreshFrame);
                     if (h3DragCleanup) h3DragCleanup();
+                    h3ActionColorObserver.disconnect();
                     h3UnsubscribeBackground(root);
                     if (originalOnRemoved) return originalOnRemoved.apply(this, args);
                 };
