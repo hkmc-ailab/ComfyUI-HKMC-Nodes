@@ -251,7 +251,7 @@ def unload_ollama_vram(model_name):
 def contains_japanese(text):
     return bool(re.search(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', text))
 
-def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None, json_schema=None):
+def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None, json_schema=None, response_info=None):
     if provider == "Gemini (Cloud)":
         
         try:
@@ -285,6 +285,8 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None,
                     contents=[types.Content(role="user", parts=contents)],
                     config=types.GenerateContentConfig(**config_args),
                 )
+            if response_info is not None and response.candidates:
+                response_info["stop_reason"] = response.candidates[0].finish_reason
             output = (response.text or "").strip()
             if not output:
                 raise RuntimeError("Geminiが空の応答を返しました。モデルの対応状況・安全性設定・利用制限を確認してください。")
@@ -312,6 +314,8 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None,
             if json_schema is not None:
                 params["response_format"] = {"type": "json_object"}
             response = client.chat.completions.create(**params)
+            if response_info is not None:
+                response_info["stop_reason"] = response.choices[0].finish_reason
             output = (response.choices[0].message.content or "").strip()
             if not output:
                 raise RuntimeError("OpenAIが空の応答を返しました。モデルの対応状況を確認してください。")
@@ -334,8 +338,10 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None,
             payload["options"]["num_predict"] = 4096
         res = requests.post(url, json=payload, timeout=900)
         res.raise_for_status()
-        prompt_result = res.json().get("response", "").strip()
-        return prompt_result
+        response = res.json()
+        if response_info is not None:
+            response_info["stop_reason"] = response.get("done_reason")
+        return response.get("response", "").strip()
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
@@ -592,7 +598,13 @@ _H3_REF_SECTIONS = (
     "subject_definitions", "summary", "retention_analysis",
     "detailed_description", "overall_soundscape", "non_diegetic_music",
 )
+_H3_REF_AUDIO_FIELDS = dict(zip(_H3_REF_SECTIONS[4:], ("ambient_sound", "bgm")))
 _H3_REF_SECTION_HEADER = re.compile(r"(?im)^[ \t]*(" + "|".join(_H3_REF_SECTIONS) + r")[ \t]*:[ \t]*")
+_H3_REF_DECORATED_HEADER = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*|__)?("
+    + "|".join(_H3_REF_SECTIONS)
+    + r")(?:\*\*|__)?[ \t]*[:：](?:\*\*|__)?[ \t]*"
+)
 _H3_REF_SHOT_HEADER = re.compile(
     r"(?im)^[ \t]*\[Shot[ \t]+(\d+)(?:[ \t]*\|[^\]\n]+)?\]"
     r"(?:[ \t]+At[ \t]+\d+:\d+(?:\.\d+)?,)?"
@@ -623,6 +635,87 @@ def _h3_validate_ref_prompt(prompt, shot_count, phase):
         end = shots[index + 1].start() if index + 1 < len(shots) else len(detail)
         if detail[shot.end():end].strip().upper() in ("", "N/A", "NONE"):
             raise H3RefPromptValidationError(f"REF2VA/HYBRID {phase}のショット{shot.group(1)}の本文が空です。")
+
+
+def _h3_ref_audio_value(text):
+    value = str(text or "").strip()
+    if value.strip("`*_ \r\n").rstrip(".").strip().casefold() in ("", "n/a", "none", "not applicable"):
+        return ""
+    return value
+
+
+def _h3_ref_join_audio(core, audio):
+    return core + "".join(f"\n\n{name}:\n{audio[name]}" for name in _H3_REF_AUDIO_FIELDS)
+
+
+def _h3_ref_prepare_audio(raw, shot_count, inputs):
+    prompt = str(raw or "").strip().lstrip("\ufeff")
+    fence = re.fullmatch(r"```[\w-]*[ \t]*\r?\n(.*?)\r?\n```", prompt, re.S)
+    if fence:
+        prompt = fence[1].strip()
+    prompt = _H3_REF_DECORATED_HEADER.sub(
+        lambda match: match[1].lower() + ":" + (
+            "" if match.string[match.end():match.end() + 1] in ("\r", "\n") else "\n"
+        ), prompt,
+    )
+    headers = list(_H3_REF_SECTION_HEADER.finditer(prompt))
+    names = [header[1].lower() for header in headers]
+    expected = [name for name in _H3_REF_SECTIONS if name not in _H3_REF_AUDIO_FIELDS or name in names]
+    if names != expected:
+        _h3_validate_ref_prompt(prompt, shot_count, "LLM応答")
+
+    trailing = headers[4:]
+    translated = {
+        match[1].lower(): prompt[match.end():trailing[i + 1].start() if i + 1 < len(trailing) else len(prompt)]
+        for i, match in enumerate(trailing)
+    }
+    audio = {}
+    pending = {}
+    for name, field in _H3_REF_AUDIO_FIELDS.items():
+        source = _h3_ref_audio_value(inputs.get(field))
+        value = _h3_ref_audio_value(translated.get(name))
+        if not source:
+            audio[name] = "N/A"
+        elif value and not contains_japanese(value):
+            audio[name] = value
+        elif not contains_japanese(source) and not _H3_REF_DECORATED_HEADER.search(source):
+            audio[name] = source
+        else:
+            audio[name] = "N/A"
+            pending[name] = source
+
+    core = prompt[:trailing[0].start()].rstrip() if trailing else prompt.rstrip()
+    _h3_validate_ref_prompt(_h3_ref_join_audio(core, audio), shot_count, "LLM応答")
+    return core, audio, pending
+
+
+def _h3_ref_translate_missing_audio(pending, provider, api_key, model_name):
+    translated = {}
+    for _ in range(2):
+        schema = {
+            "type": "object",
+            "properties": {name: {"type": "string"} for name in pending},
+            "required": list(pending),
+            "additionalProperties": False,
+        }
+        request = (
+            "Translate only the supplied ambient sound and music fields into faithful English. "
+            "Return only a JSON object with the same keys. Preserve every requested sound and music detail. "
+            "Do not add headings, extra sounds, soundtrack, or dialogue.\n"
+            + json.dumps(pending, ensure_ascii=False)
+        )
+        result = _h3_base_parse_json_object(call_llm(
+            request, provider, api_key, model_name, temp=0.1, json_schema=schema,
+        )) or {}
+        for name in pending:
+            raw = result.get(name)
+            value = _h3_ref_audio_value(raw) if isinstance(raw, str) else ""
+            if value and not contains_japanese(value) and not _H3_REF_DECORATED_HEADER.search(value):
+                translated[name] = value
+        pending = {name: source for name, source in pending.items() if name not in translated}
+        if not pending:
+            return translated
+    raise H3RefPromptValidationError("環境音・BGMの翻訳を確認できません（" + ", ".join(pending) + "）。")
 
 
 def _h3_translate_retention_style(text, provider, api_key, model_name):
@@ -1026,7 +1119,9 @@ def build_and_generate_prompt(kwargs):
         "may identify relevant subjects. Movement & Timing is exclusively for "
         "detailed_description: never summarize its shots, camera moves, "
         "framing, zooms, dialogue, or emotions in summary. If Overall Synopsis "
-        "is brief, keep summary brief; do not fill gaps from shot descriptions."
+        "is brief, keep summary brief; do not fill gaps from shot descriptions. "
+        "Keep names and <Subject N> references exactly as used in Overall Synopsis. "
+        "Do not guess pronouns or introduce subject references absent from the synopsis."
     )
 
     shot_tag_guard = (
@@ -1058,11 +1153,16 @@ def build_and_generate_prompt(kwargs):
 
     request = sys_inst
     for attempt in range(1, 4):
-        prompt_result = call_llm(request, provider, api_key, model_name, temp)
+        response_info = {}
+        raw = call_llm(request, provider, api_key, model_name, temp, response_info=response_info)
+        stop_reason = str(response_info.get("stop_reason") or "").rsplit(".", 1)[-1].casefold()
         try:
-            _h3_validate_ref_prompt(prompt_result, shot_counter, "LLM応答")
+            if stop_reason in ("length", "max_tokens"):
+                raise H3RefPromptValidationError("REF2VA/HYBRID LLM応答が出力上限で途中終了しました。")
+            core, audio, pending_audio = _h3_ref_prepare_audio(raw, shot_counter, kwargs)
         except H3RefPromptValidationError as exc:
-            print(f"[H3 Prompt Director] {attempt}/3: {exc}")
+            reason_log = f" (stop_reason={stop_reason})" if stop_reason else ""
+            print(f"[H3 Prompt Director] {attempt}/3: {exc}{reason_log}")
             if attempt == 3:
                 raise
             request = (
@@ -1072,10 +1172,9 @@ def build_and_generate_prompt(kwargs):
             )
         else:
             break
-    prompt_result = _H3_REF_SECTION_HEADER.sub(
-        lambda m: m.group(1).lower() + ":" + ("" if m.string[m.end():m.end() + 1] in ("\r", "\n") else "\n"),
-        prompt_result,
-    )
+    if pending_audio:
+        audio.update(_h3_ref_translate_missing_audio(pending_audio, provider, api_key, model_name))
+    prompt_result = _h3_ref_join_audio(core, audio)
     prompt_result = re.sub(
         r"H3SHOTSUBJECTTOKEN([1-5])END",
         lambda m: f"<Subject {m.group(1)}>",
@@ -1166,13 +1265,16 @@ def build_and_generate_prompt(kwargs):
         pattern = r"(?i)<?\bH3[\s_-]*SUBJECT[\s_-]*TOKEN[\s_-]*([1-5])[\s_-]*END\b>?"
         return re.sub(pattern, lambda m: f"H3SUBJECTTOKEN{m.group(1)}END", body)
 
+    def normalize_summary(raw):
+        return protect_subject_tags(restore_marker_variants(clean_summary_translation(raw)))
+
     def summary_is_valid(body):
         found = set(re.findall(r"H3SUBJECTTOKEN([1-5])END", body))
         if found - explicit_tags:
             return False, "subject markers absent from the source synopsis"
         if re.search(r"(?i)H3SUBJECTTOKEN(?![1-5]END)|<\s*(?:Subject|S)\b", body):
             return False, "malformed subject marker"
-        if not body or contains_japanese(body) or not explicit_tags.issubset(found):
+        if not body or body.strip().upper().rstrip(".") in ("N/A", "NONE") or contains_japanese(body) or not explicit_tags.issubset(found):
             return False, "missing markers or untranslated Japanese"
         if pronoun_hints:
             for pronoun, pattern in pronoun_forms.items():
@@ -1185,8 +1287,18 @@ def build_and_generate_prompt(kwargs):
             return False, "subject list without synopsis"
         return True, "ok"
 
-    summary_body = ""
+    section_pattern = r"(?ims)^(summary:)[ \t]*\r?\n(.*?)(?=^retention_analysis:)"
+    summary_section = re.search(section_pattern, prompt_result)
+    summary_body = normalize_summary(summary_section[2]) if summary_section else ""
+    valid, _ = summary_is_valid(summary_body)
+    if valid:
+        print("[H3 Prompt Director] summary accepted (initial response)")
+    else:
+        summary_body = ""
+
     for attempt in range(4):
+        if summary_body:
+            break
         if attempt < 2:
             request = summary_input + summary_pronoun_rule + f"\nSynopsis: {protected_story}\n"
         else:
@@ -1202,9 +1314,7 @@ def build_and_generate_prompt(kwargs):
             )
         if attempt:
             request += f"\nThe previous answer failed validation ({reason}). Return only a faithful English translation."
-        candidate = clean_summary_translation(call_llm(request, provider, api_key, model_name, temp=0.2))
-        candidate = restore_marker_variants(candidate)
-        candidate = protect_subject_tags(candidate)
+        candidate = normalize_summary(call_llm(request, provider, api_key, model_name, temp=0.2))
         valid, reason = summary_is_valid(candidate)
         if valid:
             summary_body = candidate
@@ -1223,8 +1333,7 @@ def build_and_generate_prompt(kwargs):
         lambda m: f"<Subject {m.group(1)}>", summary_body
     )
     summary_final = (summary_task_tag + " " if summary_task_tag else "") + summary_body
-    section_pattern = r"(?ims)^(summary:)\s*.*?(?=^retention_analysis:)"
-    if re.search(section_pattern, prompt_result):
+    if summary_section:
         prompt_result = re.sub(section_pattern, lambda m: "summary:\n" + summary_final + "\n\n", prompt_result, count=1)
     else:
         print("[H3 Prompt Director] summary replacement skipped: section boundaries not found")
@@ -2493,7 +2602,7 @@ def build_h3_base_prompt(kwargs):
 
 
 def h3_generate_video_prompt(kwargs):
-    """Keep the existing REF2VA/HYBRID path completely unchanged."""
+    """Choose the three- or six-section prompt builder for the selected mode."""
     if h3_generation_mode(kwargs) in _H3_BASE_MODES:
         return build_h3_base_prompt(kwargs)
     return build_and_generate_prompt(kwargs)
@@ -3712,23 +3821,27 @@ async def handle_generate_auto_scenario(request):
 
 @PromptServer.instance.routes.post("/h3/generate_prompt")
 async def handle_generate_prompt(request):
+    ollama_model_to_unload = ""
     try:
         data = await request.json()
         
         target_clip = str(data.get("target_clip", ""))
         base_locked = data.get("base_locked", False)
+        ollama_model = (
+            str(data.get("llm_model") or "").strip() or "qwen2.5:7b-instruct-q5_K_M"
+        ) if data.get("llm_provider", "Ollama (Local)") == "Ollama (Local)" else ""
         
         prompt_result = None
         if (not target_clip or target_clip == "base") and not base_locked:
+            ollama_model_to_unload = ollama_model
             prompt_result = await asyncio.to_thread(h3_generate_video_prompt, data)
-            if data.get("llm_provider") == "Ollama (Local)":
-                await asyncio.to_thread(unload_ollama_vram, data.get("llm_model", "qwen2.5:7b-instruct-q5_K_M"))
         
         mode = h3_generation_mode(data)
         clips = {}
         clips_to_translate = {}
-        for i in range(1, 11):
-            if target_clip and target_clip != "base" and str(i) != target_clip:
+        clip_numbers = () if target_clip == "base" else range(1, 11)
+        for i in clip_numbers:
+            if target_clip and str(i) != target_clip:
                 continue
             if data.get(f"c{i}_locked", False) or not data.get(f"c{i}_enabled", False):
                 continue
@@ -3746,9 +3859,8 @@ async def handle_generate_prompt(request):
 
         translated = {}
         if clips_to_translate:
+            ollama_model_to_unload = ollama_model
             translated = await asyncio.to_thread(translate_clip_texts, clips_to_translate, data)
-            if data.get("llm_provider") == "Ollama (Local)":
-                await asyncio.to_thread(unload_ollama_vram, data.get("llm_model", "qwen2.5:7b-instruct-q5_K_M"))
 
         base_definitions = _h3_base_subjects(data) if mode in _H3_BASE_MODES else None
 
@@ -3775,6 +3887,9 @@ async def handle_generate_prompt(request):
         })
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
+    finally:
+        if ollama_model_to_unload:
+            await asyncio.to_thread(unload_ollama_vram, ollama_model_to_unload)
 
 
 
