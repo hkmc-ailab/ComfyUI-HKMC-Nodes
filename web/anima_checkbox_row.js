@@ -11,7 +11,7 @@ const CHARACTER_CATEGORIES = [
     ["accessories", "装飾・装備"], ["expression", "表情"], ["pose", "ポーズ"],
     ["other", "その他"]
 ];
-const HIDDEN = ["enable_director", "character_preset", "character_tag_selection", "part_head", "part_upper", "part_waist", "part_lower", "part_legs", "full_back_view", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt", "llm_provider", "llm_api_key", "llm_model", "creative_mode", "convert_all_to_natural", "enable_negative", "negative_preset", "negative_prompt", "lock_final_prompt", "final_positive_prompt"];
+const HIDDEN = ["enable_director", "character_preset", "character_tag_selection", "part_head", "part_upper", "part_waist", "part_lower", "part_legs", "full_back_view", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt", "llm_provider", "llm_api_key", "llm_model", "creative_mode", "convert_all_to_natural", "enable_negative", "negative_preset", "negative_prompt", "lock_final_prompt", "final_positive_prompt", "scene_translation_source", "scene_translation_text", "manual_prompt_override"];
 
 function installAnimaStyles() {
     if (document.getElementById("anima-director-styles-v5")) return;
@@ -179,6 +179,8 @@ app.registerExtension({
             let generationPending = false;
             let generationRevision = 0;
             let generationSerial = 0;
+            let previewSerial = 0;
+            let previewTimer = null;
             let activeTagPreset = "";
             let loadingTagPreset = "";
             let tagLoadError = "";
@@ -187,6 +189,8 @@ app.registerExtension({
             let tagLoadPromise = null;
             let tagScrollTop = 0;
             const expandedCategories = new Set();
+            let refreshLivePreview = () => {};
+            const llmOnlySources = new Set(["scene_prompt", "llm_provider", "llm_api_key", "llm_model", "creative_mode"]);
             const generationSources = new Set([
                 "character_preset", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt",
                 "llm_provider", "llm_api_key", "llm_model", "creative_mode", "convert_all_to_natural",
@@ -208,14 +212,19 @@ app.registerExtension({
                 widget.callback?.(value);
                 if (!restoringModeState && ["final_positive_prompt", "negative_prompt", "lock_final_prompt"].includes(name)) snapshotMode();
                 if (invalidate) {
-                    const sourceChanged = mode === "llm" && (generationSources.has(name) ||
-                        (name === "final_positive_prompt" && generationPending));
-                    if (sourceChanged) {
-                        generationRevision++;
-                        if (get("lock_final_prompt")?.value) set("lock_final_prompt", false, false);
-                        status.textContent = generationPending
-                            ? "生成中に設定が変わりました。現在の結果は破棄されます。"
-                            : "設定が変わりました。［プロンプト生成］を押し直してください。";
+                    if (mode === "llm") {
+                        if (name === "final_positive_prompt") {
+                            set("manual_prompt_override", true, false);
+                        } else if (generationSources.has(name)) {
+                            if (llmOnlySources.has(name)) generationRevision++;
+                            if (get("manual_prompt_override")?.value) set("manual_prompt_override", false, false);
+                            if (name === "scene_prompt") {
+                                status.textContent = "シーン文章を変更しました。［プロンプト生成］で日本語を英語に変換してください。";
+                            } else {
+                                status.textContent = "設定を反映しました。Queueでそのまま生成できます。";
+                            }
+                            refreshLivePreview();
+                        }
                     }
                     if (mode === "normal") { normalPositiveUsed = ""; normalNegativeUsed = ""; }
                     else { llmPositiveUsed = ""; llmNegativeUsed = ""; }
@@ -431,6 +440,41 @@ app.registerExtension({
                 addField(title,e,);
                 return update;
             };
+            refreshLivePreview = () => {
+                if (mode !== "llm") return;
+                if (previewTimer) clearTimeout(previewTimer);
+                const serial = ++previewSerial;
+                previewTimer = setTimeout(async () => {
+                    const payload = {};
+                    for (const name of HIDDEN) if (get(name)) payload[name] = get(name).value;
+                    payload.enable_director = true;
+                    payload.enable_negative = true;
+                    payload.lock_final_prompt = false;
+                    payload.manual_prompt_override = false;
+                    payload.final_positive_prompt = "";
+                    payload.live_preview = true;
+                    payload.request_id = `preview-${node.id || "node"}-${serial}`;
+                    try {
+                        const response = await api.fetchApi("/anima/director/generate_prompt", {
+                            method: "POST", headers: {"Content-Type": "application/json"},
+                            body: JSON.stringify(payload)
+                        });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                        if (serial !== previewSerial || mode !== "llm" || generationPending) return;
+                        if (get("manual_prompt_override")?.value) return;
+                        const preview = String(data.positive || "");
+                        set("final_positive_prompt", preview, false);
+                        const field = root.querySelector('[data-anima-generated-positive="true"]');
+                        if (field && document.activeElement !== field) field.value = preview;
+                        if (data.scene_needs_translation) {
+                            status.textContent = "シーン文章は未変換です。［プロンプト生成］を押してください。";
+                        }
+                    } catch (error) {
+                        if (serial === previewSerial) status.textContent = `プレビュー更新失敗：${error.message}`;
+                    }
+                }, 180);
+            };
             const generate = async () => {
                 if (generationPending || mode !== "llm") return;
                 const preset = String(get("character_preset")?.value ?? "None");
@@ -444,17 +488,21 @@ app.registerExtension({
                 }
                 if (generationPending || mode !== "llm") return;
                 generationPending = true;
+                if (previewTimer) clearTimeout(previewTimer);
+                previewSerial++;
                 const serial = ++generationSerial;
                 const revision = generationRevision;
                 const requestId = `${node.id || "node"}-${Date.now()}-${serial}`;
                 set("lock_final_prompt", false, false);
-                status.textContent = "OllamaなどのLLMで英語プロンプトを生成しています…";
+                status.textContent = "シーン文章をLLMで変換しています…";
                 const payload = {};
                 for (const name of HIDDEN) if (get(name)) payload[name] = get(name).value;
                 payload.enable_director = true;
                 payload.enable_negative = true;
                 payload.lock_final_prompt = false;
                 payload.final_positive_prompt = "";
+                payload.manual_prompt_override = false;
+                payload.live_preview = false;
                 payload.request_id = requestId;
                 draw();
                 try {
@@ -470,11 +518,14 @@ app.registerExtension({
                     }
                     const positive = typeof data.positive === "string" ? data.positive.trim() : "";
                     if (!positive) throw new Error("生成されたポジティブプロンプトが空です。");
+                    set("scene_translation_source", data.scene_translation_source || "", false);
+                    set("scene_translation_text", data.scene_translation_text || "", false);
+                    set("manual_prompt_override", !!get("convert_all_to_natural")?.value, false);
                     set("final_positive_prompt", positive, false);
                     set("lock_final_prompt", true, false);
                     llmPositiveUsed = "";
                     llmNegativeUsed = "";
-                    status.textContent = "英語プロンプトの生成完了。Queueではこの確定済みプロンプトを使用します。";
+                    status.textContent = "シーンの英語変換が完了しました。今後のタグ・アングル変更は自動反映されます。";
                 } catch (error) {
                     if (generationRevision !== revision || mode !== "llm") {
                         status.textContent = "設定変更により生成結果を破棄しました。再生成してください。";
@@ -484,6 +535,7 @@ app.registerExtension({
                 } finally {
                     generationPending = false;
                     draw();
+                    if (!get("manual_prompt_override")?.value) refreshLivePreview();
                 }
             };
             const draw = () => {
@@ -508,6 +560,7 @@ app.registerExtension({
                             ? "前回の生成済みプロンプトを復元しました。Queueで使用できます。"
                             : "［プロンプト生成］を押して英語プロンプトを作成してください。";
                         draw();
+                        refreshLivePreview();
                     };
                     row.append(radio,document.createTextNode(label)); modeBar.appendChild(row);
                 }
@@ -548,7 +601,8 @@ app.registerExtension({
                         const negatives = get("negative_preset")?.options?.values || ["None"];
                         choice("negative_preset","ネガティブプリセット",negatives.map(x=>[x,x]));
                         textInput("negative_prompt","ネガティブプロンプト",3);
-                        textInput("final_positive_prompt","生成ポジティブ（編集可能）",7);
+                        const generatedField = textInput("final_positive_prompt","生成ポジティブ（編集可能）",7);
+                        generatedField.dataset.animaGeneratedPositive = "true";
                         const button = make("button", generationPending ? "プロンプト生成中…" : "プロンプト生成");
                         button.className = "ad5-button";
                         button.disabled = generationPending;
@@ -632,6 +686,7 @@ app.registerExtension({
                 refreshUsed?.();
             };
             draw();
+            queueMicrotask(() => refreshLivePreview());
         };
         const oldSerialize = nodeType.prototype.onSerialize;
         nodeType.prototype.onSerialize = function (serialized) {
