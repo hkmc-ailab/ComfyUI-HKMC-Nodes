@@ -177,6 +177,9 @@ class AnimaPromptDirector:
                 "lock_final_prompt": ("BOOLEAN", {"default": False, "label_on": "Yes(LLM_VRAM解放)", "label_off": "No", "label": "最終プロンプトをロック"}),
                 "final_positive_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "character_tag_selection": ("STRING", {"default": '{"version":1,"presets":{}}'}),
+                "scene_translation_source": ("STRING", {"default": ""}),
+                "scene_translation_text": ("STRING", {"default": ""}),
+                "manual_prompt_override": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -507,14 +510,37 @@ class AnimaPromptDirector:
     def direct_and_encode(self, model, clip, enable_director, character_preset,
                           part_head, part_upper, part_waist, part_lower, part_legs, full_back_view,
                           quality_prompt, scene_prompt, llm_provider, llm_api_key, llm_model, creative_mode, convert_all_to_natural,
-                          enable_negative, negative_preset, negative_prompt, lock_final_prompt, final_positive_prompt, shot_choice="上半身", angle_choice="正面", preview_generation=False, character_tag_selection=""):
+                          enable_negative, negative_preset, negative_prompt, lock_final_prompt, final_positive_prompt, shot_choice="上半身", angle_choice="正面", preview_generation=False, character_tag_selection="",
+                          scene_translation_source="", scene_translation_text="", manual_prompt_override=False, live_preview=False):
 
         enable_director = True
         enable_negative = True
-        if llm_provider != "None (Raw Tag)" and not lock_final_prompt and not preview_generation:
-            raise ValueError("［プロンプト］タブの［プロンプト生成］を押してからQueueしてください。")
+        # Scene translation is cached separately. Python-generated settings are
+        # composed afresh every queue execution, without an LLM call.
+        translated_scene = (scene_translation_text or "").strip()
+        scene_source = (scene_prompt or "").strip()
+        scene_valid = not scene_source or (
+            scene_translation_source == scene_source and bool(translated_scene)
+        )
+        if llm_provider != "None (Raw Tag)" and not preview_generation and not scene_valid:
+            raise ValueError("日本語のシーンが未変換、または変更されています。［プロンプト生成］でシーンを変換してください。")
 
-        if lock_final_prompt and llm_provider == "Ollama (Local)":
+        if preview_generation and not live_preview and llm_provider != "None (Raw Tag)":
+            # Explicit button action: the only place that calls the LLM.
+            translated_scene = self.call_llm(
+                llm_provider, llm_api_key, llm_model,
+                self.resolve_wildcards(scene_source),
+                convert_all=False, creative_mode=creative_mode,
+            ) if scene_source else ""
+            scene_translation_source = scene_source
+            scene_translation_text = translated_scene
+            scene_valid = True
+
+        self._scene_translation_source = scene_translation_source
+        self._scene_translation_text = scene_translation_text
+        self._scene_needs_translation = not scene_valid
+
+        if lock_final_prompt and llm_provider == "Ollama (Local)" and not preview_generation:
             self.unload_ollama(llm_model)
 
         if llm_provider == "None (Raw Tag)":
@@ -566,7 +592,7 @@ class AnimaPromptDirector:
             full_neg_text = ""
             neg_conditioning = self.encode_text(clip, "")
 
-        if llm_provider == "None (Raw Tag)" or (lock_final_prompt and final_positive_prompt.strip()):
+        if llm_provider == "None (Raw Tag)" or (manual_prompt_override and final_positive_prompt.strip()):
             structured_positive = self.resolve_wildcards(final_positive_prompt.strip())
         else:
             parsed = self.parse_character_file(character_preset)
@@ -582,12 +608,10 @@ class AnimaPromptDirector:
                 if clean_q:
                     sections_list.append(("# --- QUALITY & BASE ---", clean_q))
 
-            processed_scene = self.resolve_wildcards(scene_prompt.strip())
+            # Only the separately cached scene is LLM-generated. An outdated
+            # translation is never silently used for a changed Japanese scene.
+            processed_scene = translated_scene if scene_valid else "[Scene changed: press プロンプト生成 to translate]"
             if processed_scene:
-                processed_scene = self.call_llm(
-                    llm_provider, llm_api_key, llm_model, processed_scene, 
-                    convert_all=False, creative_mode=creative_mode
-                )
                 clean_s = processed_scene.rstrip(" ,")
                 sections_list.append(("# --- SHOT & SCENE ---", clean_s))
 
@@ -599,7 +623,7 @@ class AnimaPromptDirector:
             if selected_tags:
                 sections_list.append(("# --- CHARACTER DESIGN (JSON PRESET) ---", ", ".join(selected_tags)))
 
-            if convert_all_to_natural and llm_provider != "None (Raw Tag)":
+            if convert_all_to_natural and llm_provider != "None (Raw Tag)" and preview_generation and not live_preview:
                 quality_section = [val for hdr, val in sections_list if hdr == "# --- QUALITY & BASE ---"]
                 target_sections = [(hdr, val) for hdr, val in sections_list if hdr != "# --- QUALITY & BASE ---"]
 
@@ -690,17 +714,24 @@ async def anima_generate_prompt(request):
         values["enable_negative"] = True
         values["lock_final_prompt"] = False
         values["final_positive_prompt"] = ""
+        values["manual_prompt_override"] = False
+        live_preview = payload.get("live_preview") is True
         if values["llm_provider"] == "None (Raw Tag)":
             values["convert_all_to_natural"] = False
         class Preview(AnimaPromptDirector):
             def encode_text(self, clip, text):
                 return text
         def generate():
-            result = Preview().direct_and_encode(model=None, clip=None, preview_generation=True, **values)
-            return result["ui"]["final_text"][0], result["ui"]["negative_used"][0]
-        positive, negative = await asyncio.to_thread(generate)
+            director = Preview()
+            result = director.direct_and_encode(model=None, clip=None, preview_generation=True, live_preview=live_preview, **values)
+            return (result["ui"]["final_text"][0], result["ui"]["negative_used"][0],
+                    director._scene_translation_source, director._scene_translation_text,
+                    director._scene_needs_translation)
+        positive, negative, source, translated, stale = await asyncio.to_thread(generate)
         print(f"[AnimaPromptDirector] Preview complete: request_id={request_id}, positive_characters={len(positive)}")
-        return web.json_response({"positive": positive, "negative": negative, "request_id": request_id})
+        return web.json_response({"positive": positive, "negative": negative, "request_id": request_id,
+                                  "scene_translation_source": source, "scene_translation_text": translated,
+                                  "scene_needs_translation": stale})
     except Exception as exc:
         print(f"[AnimaPromptDirector] Preview failed: {exc}")
         return web.json_response({"error": str(exc)}, status=500)
