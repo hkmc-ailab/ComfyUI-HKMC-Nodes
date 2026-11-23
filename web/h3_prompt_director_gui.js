@@ -1460,8 +1460,8 @@ app.registerExtension({
 
                 const tabs = [
                     { id: "cast", label: "キャラクター設定" },
-                    { id: "timeline", label: "タイムライン" },
                     { id: "scene", label: "演出" },
+                    { id: "timeline", label: "タイムライン" },
                     { id: "clip", label: "クリップ" },
                     { id: "auto", label: "おまかせ" },
                     { id: "llm", label: "LLM設定" },
