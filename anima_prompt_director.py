@@ -21,6 +21,9 @@ async def get_shot_angles(request):
                 pass
     return web.json_response({})
 
+BACKGROUND_ONLY_POSITIVE = "anime background art, environment-focused composition, scenery as the main subject, no prominent foreground characters, no character-focused composition"
+BACKGROUND_ONLY_NEGATIVE = "character portrait, character close-up, character-focused composition, prominent foreground character"
+
 class AnimaPromptDirector:
     DEFAULT_BACK_FILTER = [
         "eye", "eyes", "pupil", "pupils", "iris", "eyeshadow", "eyelash", "eyelashes",
@@ -163,6 +166,7 @@ class AnimaPromptDirector:
                 "angle_choice": (["正面", "横から", "斜め前", "斜め後ろ", "上から", "下から", "後ろから", "ダッチアングル", "逆さま", "真上", "真下"], {"default": "正面"}),
                 "quality_prompt": ("STRING", {"multiline": True, "default": "__quality__, anime style, cel-shaded, crisp outlines"}),
                 "scene_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "background_only": ("BOOLEAN", {"default": False}),
                 
                 "llm_provider": (["None (Raw Tag)", "Gemini (Cloud)", "ChatGPT (OpenAI)", "Ollama (Local)"], {"default": "None (Raw Tag)", "label": "[LLM] プロバイダー"}),
                 "llm_api_key": ("STRING", {"default": "", "multiline": False, "label": "[LLM] API_Key"}),
@@ -511,10 +515,12 @@ class AnimaPromptDirector:
                           part_head, part_upper, part_waist, part_lower, part_legs, full_back_view,
                           quality_prompt, scene_prompt, llm_provider, llm_api_key, llm_model, creative_mode, convert_all_to_natural,
                           enable_negative, negative_preset, negative_prompt, lock_final_prompt, final_positive_prompt, shot_choice="上半身", angle_choice="正面", preview_generation=False, character_tag_selection="",
-                          scene_translation_source="", scene_translation_text="", manual_prompt_override=False, live_preview=False):
+                          scene_translation_source="", scene_translation_text="", manual_prompt_override=False, live_preview=False, background_only=False):
 
         enable_director = True
         enable_negative = True
+        background_only = bool(background_only and character_preset == "None" and llm_provider != "None (Raw Tag)")
+
         # Scene translation is cached separately. Python-generated settings are
         # composed afresh every queue execution, without an LLM call.
         translated_scene = (scene_translation_text or "").strip()
@@ -547,7 +553,7 @@ class AnimaPromptDirector:
             negative_preset = "None"
             full_back_view = False
 
-        is_back_view = angle_choice in ("後ろから", "斜め後ろ") or full_back_view
+        is_back_view = (angle_choice in ("後ろから", "斜め後ろ") or full_back_view) and not background_only
         if enable_negative:
             neg_parts = []
             if negative_preset != "None":
@@ -585,6 +591,8 @@ class AnimaPromptDirector:
             if is_back_view:
                 neg_parts.append("looking at viewer, facing front, front view, face, turning around, profile, side view")
 
+            if background_only:
+                neg_parts.append(BACKGROUND_ONLY_NEGATIVE)
             full_neg_text = ", ".join(neg_parts)
             clean_neg = self.clean_for_clip(full_neg_text)
             neg_conditioning = self.encode_text(clip, clean_neg)
@@ -600,7 +608,8 @@ class AnimaPromptDirector:
 
             framing = self.SHOT_TAGS.get(shot_choice, self.SHOT_TAGS["上半身"])
             angle = self.ANGLE_TAGS.get(angle_choice, self.ANGLE_TAGS["正面"])
-            sections_list.append(("# --- FRAMING & ANGLE ---", f"{framing}, {angle}"))
+            if not background_only:
+                sections_list.append(("# --- FRAMING & ANGLE ---", f"{framing}, {angle}"))
             if quality_prompt.strip():
                 resolved_q = self.resolve_wildcards(quality_prompt.strip())
                 resolved_q = self.filter_front_elements(resolved_q, is_back_view=is_back_view)
@@ -619,7 +628,7 @@ class AnimaPromptDirector:
                 back_enforce = "completely from behind, back of head, unseen face, facing away"
                 sections_list.append(("# --- POSE ENFORCEMENT ---", back_enforce))
 
-            selected_tags = self.select_character_tags(parsed, character_preset, character_tag_selection)
+            selected_tags = [] if background_only else self.select_character_tags(parsed, character_preset, character_tag_selection)
             if selected_tags:
                 sections_list.append(("# --- CHARACTER DESIGN (JSON PRESET) ---", ", ".join(selected_tags)))
 
@@ -649,6 +658,9 @@ class AnimaPromptDirector:
             else:
                 formatted_blocks = [f"{hdr}\n{val}," for hdr, val in sections_list if val]
                 structured_positive = "\n\n".join(formatted_blocks)
+
+        if background_only and BACKGROUND_ONLY_POSITIVE not in structured_positive:
+            structured_positive = structured_positive.rstrip() + "\n\n# --- BACKGROUND ONLY ---\n" + BACKGROUND_ONLY_POSITIVE
 
         if not structured_positive.strip():
             structured_positive = " "
