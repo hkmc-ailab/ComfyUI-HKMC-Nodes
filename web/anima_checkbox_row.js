@@ -11,7 +11,7 @@ const CHARACTER_CATEGORIES = [
     ["accessories", "装飾・装備"], ["expression", "表情"], ["pose", "ポーズ"],
     ["other", "その他"]
 ];
-const HIDDEN = ["enable_director", "character_preset", "character_tag_selection", "part_head", "part_upper", "part_waist", "part_lower", "part_legs", "full_back_view", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt", "llm_provider", "llm_api_key", "llm_model", "creative_mode", "convert_all_to_natural", "enable_negative", "negative_preset", "negative_prompt", "lock_final_prompt", "final_positive_prompt", "scene_translation_source", "scene_translation_text", "manual_prompt_override"];
+const HIDDEN = ["enable_director", "character_preset", "character_tag_selection", "part_head", "part_upper", "part_waist", "part_lower", "part_legs", "full_back_view", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt", "background_only", "llm_provider", "llm_api_key", "llm_model", "creative_mode", "convert_all_to_natural", "enable_negative", "negative_preset", "negative_prompt", "lock_final_prompt", "final_positive_prompt", "scene_translation_source", "scene_translation_text", "manual_prompt_override"];
 
 function installAnimaStyles() {
     if (document.getElementById("anima-director-styles-v5")) return;
@@ -192,7 +192,7 @@ app.registerExtension({
             let refreshLivePreview = () => {};
             const llmOnlySources = new Set(["scene_prompt", "llm_provider", "llm_api_key", "llm_model", "creative_mode"]);
             const generationSources = new Set([
-                "character_preset", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt",
+                "character_preset", "shot_choice", "angle_choice", "quality_prompt", "scene_prompt", "background_only",
                 "llm_provider", "llm_api_key", "llm_model", "creative_mode", "convert_all_to_natural",
                 "negative_preset", "negative_prompt", "full_back_view", "character_tag_selection"
             ]);
@@ -594,6 +594,18 @@ app.registerExtension({
                         };
                         choice("shot_choice","ショット",SHOTS.map(x=>[x,x]));
                         choice("angle_choice","アングル",ANGLES.map(x=>[x,x]));
+                        const bgRow = make("label"); bgRow.className = "ad5-check";
+                        const bgCheck = make("input"); bgCheck.type = "checkbox";
+                        const bgAvailable = get("character_preset")?.value === "None";
+                        bgCheck.checked = bgAvailable && !!get("background_only")?.value;
+                        bgCheck.disabled = !bgAvailable;
+                        bgCheck.onchange = () => set("background_only", bgCheck.checked);
+                        bgRow.append(bgCheck, document.createTextNode("背景のみ"));
+                        body.appendChild(bgRow);
+                        if (!bgAvailable) {
+                            const bgHint = make("div", "背景のみを使用するにはキャラクタープリセットを None にしてください。");
+                            bgHint.className = "ad5-hint"; body.appendChild(bgHint);
+                        }
                         textInput("scene_prompt","詳細な要望を日本語で記入",6);
                         renderCharacterSelection();
                     } else if (currentTab === "プロンプト") {
