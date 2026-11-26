@@ -173,7 +173,7 @@ function h3ResetFieldNames(selected) {
     const add = (...fields) => fields.forEach(field => names.add(field));
     if (selected.cast) {
         for (let i = 1; i <= 5; i++) {
-            for (const field of ["enabled", "preset", "name", "refmod", "pics", "audio", "extra"])
+            for (const field of ["enabled", "preset", "name", "alias", "refmod", "pics", "audio", "extra", "gender"])
                 add(`char${i}_${field}`);
         }
         add("timeline_data");
@@ -1224,6 +1224,14 @@ app.registerExtension({
                     wMap["auto_data"].value = "{}";
                 }
 
+                const normalizeCharacterGenders = () => {
+                    for (let i = 1; i <= 5; i++) {
+                        const w = wMap[`char${i}_gender`];
+                        if (w && !["未指定", "男性", "女性"].includes(w.value)) w.value = "未指定";
+                    }
+                };
+                normalizeCharacterGenders();
+                if (wMap.llm_thinking) wMap.llm_thinking.value = "ULTRA";
                 const h3ResetSelection = Object.fromEntries(H3_RESET_SECTIONS.map(section => [section.id, true]));
 
                 const h3FreshWidgetValues = {};
@@ -1255,6 +1263,7 @@ app.registerExtension({
                 let autoState = {
                     directorMode: "detailed",
                     overwrite: false,
+                    animeDirection: false, animeGenre: "auto",
                     duration: 5,
                     story: ""
                 };
@@ -1319,11 +1328,80 @@ app.registerExtension({
                     return { header, body, toggle, setCollapsed };
                 };
 
+                const presetField = (row, kind) => {
+                    const models = kind === "models";
+                    const input = row.querySelector(models ? "input" : "textarea");
+                    if (!input) return row;
+                    const bar = document.createElement("div");
+                    bar.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap;";
+                    const select = document.createElement("select");
+                    select.style.cssText = "flex:1;min-width:100px;background:#202020;color:#eee;border:1px solid #555;border-radius:6px;padding:5px;";
+                    const save = document.createElement("button"), del = document.createElement("button");
+                    save.textContent = "登録"; del.textContent = "削除";
+                    save.type = del.type = "button";
+                    save.className = del.className = "h3-tag-btn";
+                    save.style.cssText = del.style.cssText = "appearance:none;box-shadow:none;border-style:solid;border-radius:6px;background-image:none;";
+                    const status = document.createElement("div");
+                    status.style.cssText = "font-size:11px;color:#aaa;";
+                    const group = () => models ? String(wMap.llm_provider?.value || "Ollama (Local)") : "styles";
+                    let data = {}, busy = false, loaded = false;
+                    const refresh = (chosen = "") => {
+                        select.replaceChildren(new Option(models ? "登録済みモデル" : "プリセットを選択", ""));
+                        for (const name of Object.keys(data[group()] || {}).sort()) select.add(new Option(name, name));
+                        select.value = chosen;
+                    };
+                    const request = async (body) => {
+                        const res = await api.fetchApi(`/h3/presets/${kind}`, body ? {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)} : {cache:"no-store"});
+                        const result = await res.json();
+                        if (!res.ok) throw new Error(result.error || "プリセットの取得に失敗しました");
+                        return result;
+                    };
+                    const run = async (fn) => {
+                        if (busy) return;
+                        busy = true; select.disabled = save.disabled = del.disabled = true;
+                        try { await fn(); status.textContent = ""; }
+                        catch(e) { status.textContent = e.message; }
+                        finally { busy = false; select.disabled = save.disabled = del.disabled = !loaded; }
+                    };
+                    select.onchange = () => {
+                        const value = data[group()]?.[select.value];
+                        if (typeof value === "string") { input.value = value; input.dispatchEvent(new Event("input", {bubbles:true})); }
+                    };
+                    save.onclick = () => run(async () => {
+                        const value = input.value;
+                        if (!value.trim()) throw new Error("内容を入力してください");
+                        const name = models ? value.trim() : window.prompt("プリセット名", select.value || "")?.trim();
+                        if (!name) return;
+                        const provider = group();
+                        const exists = Object.prototype.hasOwnProperty.call(data[provider] || {}, name);
+                        if (exists && (models || !window.confirm(`「${name}」を上書きしますか？`))) return;
+                        data = await request({action:"save", provider, name, value, overwrite:exists});
+                        refresh(group() === provider ? name : "");
+                    });
+                    del.onclick = () => run(async () => {
+                        const name = select.value, provider = group();
+                        if (!name || !window.confirm(`「${name}」を削除しますか？`)) return;
+                        data = await request({action:"delete", provider, name}); refresh();
+                    });
+                    bar.append(select, save, del);
+                    if (models) row.append(bar, status); else { row.insertBefore(bar, input); row.append(status); }
+                    if (models) {
+                        queueMicrotask(() => {
+                            const provider = contentArea.querySelector("select");
+                            if (provider && provider !== select) provider.addEventListener("change", () => refresh());
+                        });
+                    }
+                    refresh();
+                    run(async () => { data = await request(); loaded = true; refresh(models ? input.value : ""); });
+                    return row;
+                };
+
                 const sceneFieldCard = (widgetName, label, multiline, placeholder) => {
                     const row = bindInput(widgetName, label, multiline, placeholder);
                     const card = document.createElement("div");
                     card.className = "h3-char-card";
                     const title = row.querySelector(":scope > label");
+                    if (widgetName === "quality_control") presetField(row, "retention");
                     card.appendChild(row);
                     makeCollapsible(card, `scene-${widgetName}`, title);
                     return card;
@@ -1583,12 +1661,7 @@ app.registerExtension({
                 const convertSubjectNamesInTextarea = async (ta) => {
                     if (!ta || ta.isComposing) return;
                     const original = ta.value;
-                    const names = {};
-                    for (let i = 1; i <= 5; i++) {
-                        names[i] = String(charEnabledState[i]
-                            ? (wMap[`char${i}_name`]?.value || "")
-                            : (wMap[`subject_def_${i}`]?.value || "")).trim();
-                    }
+                    const names = getDirectorNames(true);
                     try {
                         const response = await api.fetchApi("/h3/convert_subject_names", {
                             method: "POST", headers: { "Content-Type": "application/json" },
@@ -1725,6 +1798,23 @@ app.registerExtension({
                             bar.appendChild(sep);
                         }
                         for (let n = 1; n <= audios; n++) addChip("A", n, `<Audio ${n}>`, "#89d9ac");
+                        if (wName === "ambient_sound" || wName === "bgm") {
+                            const button = document.createElement("button");
+                            button.type = "button";
+                            button.textContent = "該当なし";
+                            button.title = "入力内容を N/A に置き換え";
+                            button.style.cssText = "font-size:10px;padding:3px 7px;border-radius:5px;border:1px solid #555;background:#242424;color:#89d9ac;cursor:pointer;margin-left:6px;";
+                            button.addEventListener("mousedown", e => e.preventDefault());
+                            button.addEventListener("click", () => {
+                                if (el.isComposing || composing) return;
+                                el.value = "N/A";
+                                el.focus();
+                                el.setSelectionRange(3, 3);
+                                savedStart = savedEnd = 3;
+                                el.dispatchEvent(new Event("input", { bubbles: true }));
+                            });
+                            bar.appendChild(button);
+                        }
                         if (wName === "overall_story") {
                             const convertBtn = document.createElement("button");
                             convertBtn.type = "button";
@@ -2240,7 +2330,7 @@ app.registerExtension({
                     shots:directorSnapshot(),
                     subjects:Array.from({length:5},(_,i)=>{const n=i+1;return [
                         !!charEnabledState[n],wMap[`char${n}_name`]?.value||'',
-                        wMap[`char${n}_preset`]?.value||'',wMap[`char${n}_extra`]?.value||'',
+                        wMap[`char${n}_preset`]?.value||'',wMap[`char${n}_extra`]?.value||'',wMap[`char${n}_gender`]?.value||'未指定',
                         wMap[`subject_def_${n}`]?.value||'',wMap[`subject_kind_${n}`]?.value||''];}),
                     quality:wMap.quality_control?.value||'',creative:wMap.creative_mode?.value||'',
                     sound:wMap.ambient_sound?.value||'',music:wMap.bgm?.value||''
@@ -2249,17 +2339,19 @@ app.registerExtension({
                     const w = wMap[name]; if (!w) return;
                     w.value = value; if (w.callback) w.callback(value);
                 };
-                const getDirectorNames = () => {
+                const getDirectorNames = (includeAliases = false) => {
                     const names = {};
                     for (let i=1; i<=5; i++) {
                         const raw = String(charEnabledState[i] ? (wMap[`char${i}_name`]?.value||'') : (wMap[`subject_def_${i}`]?.value||'')).trim();
-                        if (raw) names[i] = raw;
+                        const alias = charEnabledState[i] ? String(wMap[`char${i}_alias`]?.value || '').trim() : '';
+                        if (includeAliases && alias) names[i] = [raw, alias];
+                        else if (raw) names[i] = raw;
                     }
                     return names;
                 };
                 const directorConvert = async (text) => {
                     const res = await api.fetchApi('/h3/convert_subject_names', {method:'POST',
-                        headers:{'Content-Type':'application/json'},body:JSON.stringify({text,names:getDirectorNames()})});
+                        headers:{'Content-Type':'application/json'},body:JSON.stringify({text,names:getDirectorNames(true)})});
                     if (!res.ok) throw Error('Subjectコード変換に失敗しました');
                     const obj = await res.json();
                     if (typeof obj.text !== 'string') throw Error('Subjectコード変換の応答が不正です');
@@ -2283,12 +2375,17 @@ app.registerExtension({
                 };
                 const directorRequest = async (url, payload) => {
                     const settings = {};
-                    for(const k of ['llm_provider','llm_api_key','llm_model']) settings[k]=wMap[k]?.value||'';
+                    for(const k of ['llm_provider','llm_api_key','llm_model','llm_thinking']) settings[k]=wMap[k]?.value||'';
+                    for (let i=1; i<=5; i++) {
+                        settings[`char${i}_enabled`] = !!charEnabledState[i];
+                        settings[`char${i}_gender`] = wMap[`char${i}_gender`]?.value || "未指定";
+                    }
                     const controller = new AbortController();
-                    const timer = setTimeout(()=>controller.abort(),600000);
+                    const timer = setTimeout(()=>controller.abort(),wMap.llm_thinking?.value === "ON" ? 3600000 : 600000);
                     try {
-                        const res=await api.fetchApi(url,{method:'POST',headers:{'Content-Type':'application/json'},
-                            body:JSON.stringify({...settings,...payload}),signal:controller.signal});
+                        const requestFetch = wMap.llm_thinking?.value === "ON" ? (path, options) => fetch(typeof api.apiURL === "function" ? api.apiURL(path) : path, options) : (path, options) => api.fetchApi(path, options);
+                        const res=await requestFetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+                            body:JSON.stringify({...settings,...payload,input_aliases:getDirectorNames(true)}),signal:controller.signal});
                         const result=await res.json();
                         if (!res.ok || !result.success) throw Error(result.error||`HTTP ${res.status}`);
                         return result;
@@ -2558,6 +2655,35 @@ app.registerExtension({
                             title.textContent = `キャラクター${i} (S${i})`;
 
                             const nameRow = bindInput(`char${i}_name`, "キャラクター名", false, "キャラクター名を英語で入力");
+                            const aliasRow = bindInput(`char${i}_alias`, "呼び名（任意）", false, "例：アネット（入力・コード変換専用）");
+                            const genderRow = document.createElement("div");
+                            genderRow.className = "h3-field-row";
+                            const genderLabel = document.createElement("label");
+                            genderLabel.textContent = "性別";
+                            const genderBar = document.createElement("div");
+                            genderBar.style.cssText = "display:flex;align-items:center;gap:14px;flex-wrap:nowrap;";
+                            const genderWidget = wMap[`char${i}_gender`];
+                            genderBar.setAttribute("role", "radiogroup");
+                            genderBar.setAttribute("aria-label", `キャラクター${i}の性別`);
+                            for (const [value, label] of [["未指定", "未選択"], ["男性", "男性"], ["女性", "女性"]]) {
+                                const option = document.createElement("label");
+                                option.style.cssText = "display:inline-flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;font-size:11px;color:#ddd;font-weight:normal;";
+                                const radio = document.createElement("input");
+                                radio.type = "radio";
+                                radio.name = `h3-character-gender-${node.id}-${i}`;
+                                radio.value = value;
+                                radio.checked = (genderWidget?.value || "未指定") === value;
+                                radio.disabled = !genderWidget;
+                                radio.style.cssText = "margin:0;width:13px;height:13px;accent-color:#007acc;cursor:pointer;";
+                                radio.onchange = () => {
+                                    if (!radio.checked || !genderWidget) return;
+                                    genderWidget.value = value;
+                                    if (genderWidget.callback) genderWidget.callback(value);
+                                };
+                                option.append(radio, document.createTextNode(label));
+                                genderBar.appendChild(option);
+                            }
+                            genderRow.append(genderLabel, genderBar);
                             const presetRow = bindInput(`char${i}_preset`, "プリセット");
                             const refmodRow = bindInput(`char${i}_refmod`, "RefMod");
                             const refmodSelect = refmodRow.querySelector("select");
@@ -2571,7 +2697,7 @@ app.registerExtension({
                             const voiceRow = bindInput(`char${i}_audio`, "ボイスリファレンス");
                             const extraRow = bindInput(`char${i}_extra`, "特徴定義・追記", true, "キャラクターの特徴や追加の特徴を入力");
 
-                            card.append(title, nameRow, presetRow);
+                            card.append(title, nameRow, aliasRow, genderRow, presetRow);
                             if (isReferenceMode()) card.append(refmodRow, picRow, voiceRow);
                             card.append(extraRow);
                             contentArea.appendChild(card);
@@ -3000,7 +3126,7 @@ app.registerExtension({
                         warn.style.marginTop = "8px";
                         warn.style.marginBottom = "8px";
                         warn.style.marginLeft = "4px";
-                        warn.textContent = "※必ず先にキャラクター設定と演出を設定してください。";
+                        warn.textContent = "※必ず先にキャラクター設定を設定してください。";
 
                         const lblOw = document.createElement("label");
                         lblOw.style.fontSize = "11px";
@@ -3022,7 +3148,50 @@ app.registerExtension({
                         const bulkStatus = document.createElement("div");
                         bulkStatus.style.cssText = "font-size:10px;line-height:1.5;color:#aeb7c2;min-height:15px;white-space:pre-wrap;";
                         bulkStatus.setAttribute("role", "status");
-                        autoCard1.append(execBtn, warn, lblOw, bulkStatus);
+                        const animeLabel = lblOw.cloneNode(false);
+                        const animeCheck = document.createElement("input");
+                        animeCheck.type = "checkbox";
+                        animeCheck.checked = autoState.animeDirection === true;
+                        animeCheck.style.accentColor = "#007acc";
+                        const animeHint = document.createElement("div");
+                        animeHint.style.cssText = "font-size:10px;line-height:1.5;color:#aeb7c2;padding-left:22px;";
+                        const genreRow = document.createElement("div");
+                        genreRow.style.cssText = "padding-left:22px;display:flex;flex-direction:column;gap:5px;";
+                        const genreLabel = document.createElement("label");
+                        genreLabel.textContent = "シーンの演出ジャンル";
+                        const genreSelect = document.createElement("select");
+                        genreSelect.style.cssText = "background:#181818;color:#fff;border:1px solid #555;border-radius:4px;padding:5px;";
+                        const genreOptions = [["auto", "おまかせ（自動判定）", "原案の明示的な演出意図を優先し、最適なジャンルを選ぶ。"], ["daily", "日常・ほのぼの", "生活感、自然な仕草、視線、穏やかな間。"], ["comedy", "コメディ", "現実的な範囲のコミカルな反応、掛け合い、間。"], ["gag", "ギャグアニメ", "漫画的物理法則、極端な緩急、白目、集中線、衝撃フラッシュ、デフォルメ、オチ。深刻な心理ドラマへ変更しない。明示された打撃方法と飛ぶ原因を変えない。"], ["battle", "戦闘・アクション", "予備動作、運動方向、シルエット、衝撃、フォロースルー。"], ["serious", "シリアス", "緊張、余白、静止、微細な表情、不要なギャグ禁止。"], ["emotion", "感動・ドラマ", "感情の段階的変化、視線、余韻。"], ["romance", "恋愛・ラブコメ", "原案の関係性を維持し、照れ、視線、距離感、間を描く。勝手に親密な接触を追加しない。"], ["horror", "ホラー・サスペンス", "不穏な余白、静寂、恐怖の予兆。原案にない脅威を追加しない。"], ["fantasy", "幻想・神秘", "幻想的な光、空間の奥行き、神秘的な間。新しい魔法や能力を追加しない。"]];
+                        for (const [value, label] of genreOptions) {
+                            const option = document.createElement("option");
+                            option.value = value; option.textContent = label; genreSelect.append(option);
+                        }
+                        genreSelect.value = genreOptions.some(g => g[0] === autoState.animeGenre) ? autoState.animeGenre : "auto";
+                        const genreHint = document.createElement("div");
+                        genreHint.style.cssText = "font-size:10px;color:#aeb7c2;line-height:1.5;";
+                        const updateGenre = () => {
+                            genreRow.style.display = animeCheck.checked ? "flex" : "none";
+                            genreSelect.disabled = !animeCheck.checked;
+                            genreHint.textContent = genreOptions.find(g => g[0] === genreSelect.value)?.[2] || "";
+                        };
+                        genreSelect.onchange = () => { autoState.animeGenre = genreSelect.value; saveAutoState(); updateGenre(); };
+                        genreLabel.append(genreSelect);
+                        genreRow.append(genreLabel, genreHint);
+                        const updateAnimeHint = () => {
+                            updateGenre();
+                            animeHint.textContent = animeCheck.checked
+                                ? "原案を維持しつつ、芝居・表情・間・カメラワークを補完し、尺に合わせて絵コンテを考案します（2段階LLM処理）。"
+                                : "原案に忠実な従来のショット考案を行います。";
+                        };
+                        animeCheck.onchange = () => {
+                            autoState.animeDirection = animeCheck.checked;
+                            bulkStatus.textContent = "";
+                            saveAutoState();
+                            updateAnimeHint();
+                        };
+                        animeLabel.append(animeCheck, document.createTextNode("アニメーション風に演出を補完する"));
+                        updateAnimeHint();
+                        autoCard1.append(execBtn, warn, lblOw, animeLabel, animeHint, genreRow, bulkStatus);
 
                         const autoCard3 = document.createElement("div");
                         autoCard3.className = "h3-char-card";
@@ -3084,7 +3253,16 @@ app.registerExtension({
                             saveAutoState();
                         };
                         
-                        autoCard4.append(storyTitle, storyTa);
+                        const storyConvert = document.createElement("button");
+                        storyConvert.type = "button";
+                        storyConvert.className = "h3-tag-btn";
+                        storyConvert.textContent = "コード変換";
+                        storyConvert.title = "定義した名前をSubjectタグに変換";
+                        storyConvert.style.alignSelf = "flex-end";
+                        storyConvert.onclick = async () => {
+                            try { await convertSubjectNamesInTextarea(storyTa); } catch (err) { alert(err.message); }
+                        };
+                        autoCard4.append(storyTitle, storyConvert, storyTa);
                         contentArea.append(autoCard1, autoCard3, autoCard4);
 
                         execBtn.onclick = async () => {
@@ -3101,18 +3279,25 @@ app.registerExtension({
                                 storyTa.focus();
                                 return;
                             }
+                            const animeDirection = autoState.animeDirection === true;
                             execBtn.disabled = true;
-                            execBtn.textContent = "⏳ シナリオ考案中... (LLM通信中)";
-                            bulkStatus.textContent = "LLMでショットを考案しています。完了後、ショットとあらすじを反映します。";
+                            animeCheck.disabled = true;
+                            genreSelect.disabled = true;
+                            execBtn.textContent = animeDirection ? "⏳ アニメ演出・絵コンテ考案中..." : "⏳ シナリオ考案中... (LLM通信中)";
+                            bulkStatus.textContent = animeDirection
+                                ? "演出補完 → 絵コンテ・時間配分の順で考案しています。完了後に反映します。"
+                                : "LLMでショットを考案しています。完了後、ショットとあらすじを反映します。";
                             bulkStatus.style.color = "#aeb7c2";
                             saveAutoState();
                             const payload = {};
                             (node.widgets || []).forEach(w => { payload[w.name] = w.value; });
-                            payload.auto_data = JSON.stringify({story: synopsis, duration: autoState.duration});
+                            for (let i=1; i<=5; i++) payload[`char${i}_enabled`] = !!charEnabledState[i];
+                            payload.auto_data = JSON.stringify({story: synopsis, duration: autoState.duration, animeDirection, animeGenre: genreSelect.value});
                             const controller = new AbortController();
-                            const timeoutId = setTimeout(() => controller.abort(), 600000);
+                            const timeoutId = setTimeout(() => controller.abort(), (animeDirection || wMap.llm_thinking?.value === "ON") ? 3600000 : 600000);
                             try {
-                                const res = await api.fetchApi("/h3/generate_auto_scenario", {
+                                const scenarioFetch = (animeDirection || wMap.llm_thinking?.value === "ON") ? (path, options) => fetch(typeof api.apiURL === "function" ? api.apiURL(path) : path, options) : (path, options) => api.fetchApi(path, options);
+                                const res = await scenarioFetch("/h3/generate_auto_scenario", {
                                     method: "POST", headers: { "Content-Type": "application/json" },
                                     body: JSON.stringify(payload), signal: controller.signal
                                 });
@@ -3136,7 +3321,7 @@ app.registerExtension({
                                     }
                                 }
                                 
-                                setDirectorWidget("overall_story", synopsis);
+                                setDirectorWidget("overall_story", typeof data.overall_story === "string" ? data.overall_story : synopsis);
                                 alert("ショットを［タイムライン］に、原案を［演出］の全体のあらすじに反映しました。\n内容を確認・修正してから「プロンプト生成」タブで実行してください。");
                                 
                                 activeTab = "timeline";
@@ -3151,10 +3336,12 @@ app.registerExtension({
                                 }
 
                             } catch (err) {
-                                bulkStatus.textContent = `シナリオ考案エラー：${err.message}`;
+                                bulkStatus.textContent = `シナリオ考案エラー：${err.name === "AbortError" ? "待機時間の上限に達しました。コンソールの処理状況を確認してください。" : err.message}`;
                                 bulkStatus.style.color = "#ff9b9b";
                             } finally {
                                 clearTimeout(timeoutId);
+                                animeCheck.disabled = false;
+                                updateGenre();
                                 execBtn.disabled = false;
                                 execBtn.textContent = "▶ ベースのシナリオを考案してタイムラインに適用";
                             }
@@ -3783,7 +3970,7 @@ app.registerExtension({
                             titleLLM,
                             bindInput("llm_provider", "プロバイダの選択"),
                             bindInput("llm_api_key", "APIキー (Windows環境変数登録済みの場合は空欄可)"),
-                            bindInput("llm_model", "モデル名 (例: gemini-2.5-flash, qwen2.5:7b-instruct-q5_K_M)"),
+                            presetField(bindInput("llm_model", "モデル名 (例: gemini-2.5-flash, qwen2.5:7b-instruct-q5_K_M)"), "models"),
                             bindInput("creative_mode", "[LLM] 演出/あそび (光・空気感・情景の自動補完)")
                         );
 
@@ -3880,6 +4067,7 @@ app.registerExtension({
                                     if(charEnabledState[i]){
                                         sourceSubjects.push({slot:i,kind:'人物',name:String(wMap[`char${i}_name`]?.value||''),
                                             preset:String(wMap[`char${i}_preset`]?.value||''),
+                                            gender:String(wMap[`char${i}_gender`]?.value||'未指定'),
                                             extra:String(wMap[`char${i}_extra`]?.value||'')});
                                     }else if(String(wMap[`subject_def_${i}`]?.value||'').trim()){
                                         const referencedInBase = directorSnapshot().some(shot => shot.enabled &&
@@ -4094,7 +4282,7 @@ app.registerExtension({
 
                             try {
                                 const controller = new AbortController();
-                                const timeoutId = setTimeout(() => controller.abort(), 600000);
+                                const timeoutId = setTimeout(() => controller.abort(), wMap.llm_thinking?.value === "ON" ? 3600000 : 600000);
 
                                 const res = await fetch("/h3/generate_prompt", {
                                     method: "POST",
@@ -4215,7 +4403,7 @@ app.registerExtension({
 
                                         try {
                                             const controller = new AbortController();
-                                            const timeoutId = setTimeout(() => controller.abort(), 600000);
+                                            const timeoutId = setTimeout(() => controller.abort(), wMap.llm_thinking?.value === "ON" ? 3600000 : 600000);
 
                                             const res = await fetch("/h3/generate_prompt", {
                                                 method: "POST",
@@ -4273,7 +4461,7 @@ app.registerExtension({
 
                             try {
                                 const controller = new AbortController();
-                                const timeoutId = setTimeout(() => controller.abort(), 600000);
+                                const timeoutId = setTimeout(() => controller.abort(), wMap.llm_thinking?.value === "ON" ? 3600000 : 600000);
 
                                 const res = await fetch("/h3/generate_prompt", {
                                     method: "POST",
@@ -4417,7 +4605,7 @@ app.registerExtension({
                             }
                             if (selected.auto) {
                                 const freshAuto = h3ParseClipSettings(wMap.auto_data?.value);
-                                autoState = {directorMode:"detailed",overwrite:false,duration:5,story:"",...freshAuto};
+                                autoState = {directorMode:"detailed",overwrite:false,animeDirection:false,animeGenre:"auto",duration:5,story:"",...freshAuto};
                                 if (!autoState.uiCollapsed || typeof autoState.uiCollapsed !== "object" ||
                                     Array.isArray(autoState.uiCollapsed)) autoState.uiCollapsed = {};
                             }
@@ -4712,6 +4900,8 @@ app.registerExtension({
                 const onConfigure = node.onConfigure;
                 node.onConfigure = function () {
                     if (onConfigure) onConfigure.apply(this, arguments);
+                    normalizeCharacterGenders();
+                if (wMap.llm_thinking) wMap.llm_thinking.value = "ULTRA";
                     for (let i = 1; i <= 5; i++) {
                         if (wMap[`char${i}_enabled`]) charEnabledState[i] = !!wMap[`char${i}_enabled`].value;
                     }
@@ -4735,7 +4925,7 @@ app.registerExtension({
                     if (!Array.isArray(state.items)) state.items = [];
                     try {
                         if (wMap["auto_data"] && wMap["auto_data"].value) {
-                            autoState = { ...autoState, ...JSON.parse(wMap["auto_data"].value) };
+                            autoState = { ...autoState, animeDirection: false, animeGenre: "auto", ...JSON.parse(wMap["auto_data"].value) };
                         }
                     } catch(e){}
                     clipData = h3ParseClipSettings(wMap["clips_data_json"]?.value);
