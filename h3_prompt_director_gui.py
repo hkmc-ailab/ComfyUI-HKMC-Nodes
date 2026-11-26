@@ -5,6 +5,7 @@ import base64
 import asyncio
 import mimetypes
 import math
+import time
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -58,6 +59,66 @@ async def h3_node_background_image(request):
     if path is None:
         raise web.HTTPNotFound()
     return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+
+_H3_PRESET_FILES = {"models": "llm_models.json", "retention": "retention_presets.json"}
+
+def _h3_preset_path(kind):
+    return os.path.join(os.path.dirname(__file__), "presets", _H3_PRESET_FILES[kind])
+
+def _h3_read_presets(kind):
+    try:
+        with open(_h3_preset_path(kind), encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError("プリセットファイルの形式が不正です")
+    return data
+
+@PromptServer.instance.routes.get("/h3/presets/{kind}")
+async def h3_get_presets(request):
+    try:
+        return web.json_response(_h3_read_presets(request.match_info["kind"]), headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+@PromptServer.instance.routes.post("/h3/presets/{kind}")
+async def h3_change_presets(request):
+    try:
+        kind = request.match_info["kind"]
+        body = await request.json()
+        name = body["name"].strip()
+        group = body["provider"].strip() if kind == "models" else "styles"
+        if not name or not group:
+            raise ValueError("名前を入力してください")
+        data = _h3_read_presets(kind)
+        entries = data.setdefault(group, {})
+        if body["action"] == "delete":
+            entries.pop(name, None)
+        elif body["action"] == "save":
+            value = name if kind == "models" else body["value"]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("内容を入力してください")
+            if name in entries and not body.get("overwrite"):
+                raise ValueError("同名のプリセットが存在します")
+            entries[name] = value
+        else:
+            raise ValueError("不明な操作です")
+        path = _h3_preset_path(kind)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return web.json_response(data)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
 
 
 def get_refmod_files():
@@ -251,7 +312,7 @@ def unload_ollama_vram(model_name):
 def contains_japanese(text):
     return bool(re.search(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', text))
 
-def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None, json_schema=None, response_info=None):
+def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None, json_schema=None, response_info=None, *, think=False, translation_stage=None):
     if provider == "Gemini (Cloud)":
         
         try:
@@ -330,18 +391,31 @@ def call_llm(sys_inst, provider, api_key, model_name, temp=0.7, audio_path=None,
             "model": target_model,
             "prompt": sys_inst,
             "stream": False,
-            "think": False,
+            "think": bool(think),
             "options": {"temperature": temp},
         }
         if json_schema is not None:
             payload["format"] = json_schema
             payload["options"]["num_predict"] = 4096
-        res = requests.post(url, json=payload, timeout=900)
+        if translation_stage:
+            think = False
+            payload["think"] = False
+            payload["options"].update(num_ctx=16384, num_predict=8192)
+        elif think:
+            payload["options"].update(num_ctx=16384, num_predict=12288)
+        if think or translation_stage:
+            print(f"[H3 Prompt Director] LLM stage: {translation_stage or 'general'}; options: {payload['options']}; think={think}; endpoint=/api/generate", flush=True)
+        started = time.perf_counter()
+        res = requests.post(url, json=payload, timeout=1800 if think else 900)
         res.raise_for_status()
         response = res.json()
         if response_info is not None:
             response_info["stop_reason"] = response.get("done_reason")
-        return response.get("response", "").strip()
+        if think or translation_stage:
+            _h3_log_ollama_thinking(response, response.get("thinking"), response.get("response"))
+        if translation_stage:
+            print(f"[H3 Prompt Director] {translation_stage}: wall_seconds={time.perf_counter()-started:.3f}; prompt_eval_count={response.get('prompt_eval_count')}; eval_count={response.get('eval_count')}; total_duration_ns={response.get('total_duration')}; load_duration_ns={response.get('load_duration')}", flush=True)
+        return (response.get("response") or "").strip()
     else:
         raise ValueError(f"未知のLLMプロバイダー: {provider}")
 
@@ -465,6 +539,9 @@ def translate_clip_texts(clips_dict, kwargs):
     prompt_text += "CRITICAL RULE 6: DO NOT summarize or shorten the descriptions. Translate EVERY detail, including lighting, atmosphere, character emotions, and camera movements faithfully.\n"
     prompt_text += "CRITICAL RULE 7: Keep any English instructions (such as 'CRITICAL: ...' or '[Shot X | ...]' or 'Do not continue...') exactly as they are. DO NOT translate or modify them.\n\n"
     
+    gender_context = _h3_gender_context(kwargs)
+    if gender_context:
+        prompt_text += gender_context + "\n\n"
     dialogue_blocks = {}
     for k, text in clips_dict.items():
         parts = _H3_CLIP_DIALOGUE_BLOCK.split(text)
@@ -478,7 +555,7 @@ def translate_clip_texts(clips_dict, kwargs):
     model_name = kwargs.get("llm_model", "").strip()
     
     try:
-        result_text = call_llm(prompt_text, provider, api_key, model_name, temp=0.3)
+        result_text = call_llm(prompt_text, provider, api_key, model_name, temp=0.3, think=kwargs.get("llm_thinking") == "ON")
     except Exception as e:
         print(f"Translation Error: {e}")
         return clips_dict
@@ -689,7 +766,7 @@ def _h3_ref_prepare_audio(raw, shot_count, inputs):
     return core, audio, pending
 
 
-def _h3_ref_translate_missing_audio(pending, provider, api_key, model_name):
+def _h3_ref_translate_missing_audio(pending, provider, api_key, model_name, *, think=False):
     translated = {}
     for _ in range(2):
         schema = {
@@ -705,7 +782,7 @@ def _h3_ref_translate_missing_audio(pending, provider, api_key, model_name):
             + json.dumps(pending, ensure_ascii=False)
         )
         result = _h3_base_parse_json_object(call_llm(
-            request, provider, api_key, model_name, temp=0.1, json_schema=schema,
+            request, provider, api_key, model_name, temp=0.1, json_schema=schema, think=False, translation_stage="audio_translation",
         )) or {}
         for name in pending:
             raw = result.get(name)
@@ -718,7 +795,7 @@ def _h3_ref_translate_missing_audio(pending, provider, api_key, model_name):
     raise H3RefPromptValidationError("環境音・BGMの翻訳を確認できません（" + ", ".join(pending) + "）。")
 
 
-def _h3_translate_retention_style(text, provider, api_key, model_name):
+def _h3_translate_retention_style(text, provider, api_key, model_name, *, think=False):
     sources = [part.strip() for part in re.split(r"(?<=[。！？])|\r?\n", text) if part.strip()]
     pending = {str(index): source for index, source in enumerate(sources, 1) if contains_japanese(source)}
     translations = {str(index): source for index, source in enumerate(sources, 1) if not contains_japanese(source)}
@@ -751,7 +828,7 @@ def _h3_translate_retention_style(text, provider, api_key, model_name):
         )
         try:
             result = _h3_base_parse_json_object(call_llm(
-                request, provider, api_key, model_name, 0.0, json_schema=schema,
+                request, provider, api_key, model_name, 0.0, json_schema=schema, think=False, translation_stage="retention_translation",
             ))
         except Exception as exc:
             raise H3RefPromptValidationError(f"作画・禁止事項の翻訳に失敗しました（{exc}）。") from exc
@@ -795,12 +872,15 @@ def convert_named_subjects(text, names, *, ignore_case=False, slots=None):
         return text if isinstance(text, str) else ""
     aliases = {}
     for key, raw in names.items():
-        if not re.fullmatch(r"[1-5]", str(key)) or not isinstance(raw, str):
+        if not re.fullmatch(r"[1-5]", str(key)):
             continue
-        name = raw.strip()
-        if not name or re.fullmatch(r"<\s*Subject\s+[1-5]\s*>", name, re.I):
-            continue
-        aliases.setdefault(name.lower() if ignore_case else name, set()).add(int(key))
+        for item in raw if isinstance(raw, (list, tuple)) else [raw]:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if not name or re.fullmatch(r"<\s*Subject\s+[1-5]\s*>", name, re.I):
+                continue
+            aliases.setdefault(name.lower() if ignore_case else name, set()).add(int(key))
     unique = {
         name: next(iter(indices))
         for name, indices in aliases.items()
@@ -809,8 +889,8 @@ def convert_named_subjects(text, names, *, ignore_case=False, slots=None):
     if not unique:
         return text
     alternatives = "|".join(re.escape(name) for name in sorted(unique, key=len, reverse=True))
-    pat = re.compile(r"<[^>]*>|(?<![A-Za-z0-9_])(?:" + alternatives + r")(?![A-Za-z0-9_])",
-                     re.IGNORECASE if ignore_case else 0)
+    pat = re.compile(r"\[H3D1:[A-Za-z0-9_-]+\]|<d>.*?</d>|<[^>]*>|(?<![A-Za-z0-9_])(?:" + alternatives + r")(?![A-Za-z0-9_])",
+                     (re.IGNORECASE if ignore_case else 0) | re.DOTALL)
 
     def replace(match):
         value = match.group(0)
@@ -824,10 +904,96 @@ def convert_named_subjects(text, names, *, ignore_case=False, slots=None):
 async def handle_convert_subject_names(request):
     try:
         data = await request.json()
-        converted = convert_named_subjects(data.get("text", ""), data.get("names", {}))
+        converted = convert_named_subjects(data.get("text", ""), data.get("names", {}), ignore_case=True)
         return web.json_response({"text": converted})
     except Exception:
         return web.json_response({"text": ""})
+
+
+def _h3_character_gender(inputs, slot):
+    """Only explicit selections on enabled character slots are authoritative."""
+    if not inputs.get(f"char{slot}_enabled", False):
+        return ""
+    return {"男性": "male", "女性": "female"}.get(str(inputs.get(f"char{slot}_gender", "未指定")), "")
+
+
+def _h3_gender_context(inputs, *, japanese=False, slots=None):
+    rows = []
+    for slot in range(1, 6):
+        if slots is not None and slot not in slots:
+            continue
+        gender = _h3_character_gender(inputs, slot)
+        if gender:
+            value = {"male": "男性", "female": "女性"}[gender] if japanese else gender
+            rows.append(f"<Subject {slot}>: {value}")
+    if not rows:
+        return ""
+    if japanese:
+        return ("【キャラクター情報】\n" + "\n".join(rows) + "\n"
+                "指定された性別を維持してください。この情報だけを理由に人物を登場させないでください。"
+                "性別が不明な人物の性別・年齢は推測せず、Subjectコードを使ってください。")
+    return ("Character gender metadata (only for characters already present in the source):\n"
+            + "\n".join(rows) + "\n"
+            "Respect the specified gender when referring to each character. Do not introduce characters, "
+            "events or dialogue based on this metadata. Prefer the existing subject identifier or name; "
+            "do not guess gender or pronouns when unknown.")
+
+
+def _h3_input_names(inputs):
+    names = {}
+    for i in range(1, 6):
+        if inputs.get(f"char{i}_enabled", i == 1):
+            name = str(inputs.get(f"char{i}_name", "") or "").strip()
+            preset = inputs.get(f"char{i}_preset", "None")
+            if not name and preset not in ("None", "Custom Text"):
+                name = str(preset or "").strip()
+            names[i] = [name, str(inputs.get(f"char{i}_alias", "") or "").strip()]
+        else:
+            names[i] = str(inputs.get(f"subject_def_{i}", "") or "").strip()
+    return names
+
+
+def _h3_director_alias_payload(data):
+    names = data.pop("input_aliases", {})
+    if not isinstance(names, dict) or not any(isinstance(v, list) for v in names.values()):
+        return data
+    def convert(value):
+        if not isinstance(value, str):
+            return value
+        parts = _H3_BULK_QUOTED_TEXT.split(value)
+        for i in range(0, len(parts), 2):
+            parts[i] = convert_named_subjects(parts[i], names, ignore_case=True)
+        return "".join(parts)
+    for key in ("story", "overall_story", "instruction"):
+        if key in data:
+            data[key] = convert(data[key])
+    for shot in data.get("shots", []) if isinstance(data.get("shots"), list) else []:
+        if not isinstance(shot, dict):
+            continue
+        for key in ("story", "action"):
+            if key in shot:
+                shot[key] = convert(shot[key])
+        if isinstance(shot.get("notes"), dict):
+            for key in shot["notes"]:
+                if key != "dialogue":
+                    shot["notes"][key] = convert(shot["notes"][key])
+    return data
+
+
+def _h3_normalize_input_names(inputs):
+    result = dict(inputs)
+    names = _h3_input_names(inputs)
+    if not any(isinstance(v, list) and v[1] for v in names.values()):
+        return result
+    for key, value in inputs.items():
+        if isinstance(value, str) and (key in ("overall_story", "situation") or
+                re.fullmatch(r"(?:shot[1-4]_action|c(?:[1-9]|10)_(?:s[1-4]_action|prompt))", key)):
+            # Only convert names; leave existing Subject spelling to existing pipeline.
+            parts = _H3_BULK_QUOTED_TEXT.split(value)
+            for i in range(0, len(parts), 2):
+                parts[i] = convert_named_subjects(parts[i], names, ignore_case=True)
+            result[key] = "".join(parts)
+    return result
 
 
 def process_wildcards(text):
@@ -912,8 +1078,14 @@ def _h3_ref_subject_sources(kwargs, declared_speakers, *, for_translation=False)
         }
 
         combined = "\n".join(desc_parts).strip()
-        if combined or name or subj_idx in declared_speakers:
-            subjects.append(f"<Subject {subj_idx}> name is {label}. {label} is {combined}" if combined else f"<Subject {subj_idx}> name is {label}.")
+        gender = _h3_character_gender(kwargs, i)
+        if combined or name or subj_idx in declared_speakers or gender:
+            identity = f"<Subject {subj_idx}> name is {label}."
+            if gender:
+                identity += f" Gender: {gender}."
+            if combined:
+                identity += f" {label} is {combined}"
+            subjects.append(identity)
 
     for i in range(1, 6):
         if kwargs.get(f"char{i}_enabled", (i == 1)):
@@ -1133,6 +1305,9 @@ def build_and_generate_prompt(kwargs):
         "and never invent tokens absent from that shot. You may add a short "
         "English explanation after a token. These tokens are not for summary."
     )
+    gender_context = _h3_gender_context(kwargs)
+    if gender_context:
+        speech_guard += "\n" + gender_context
     sys_inst = raw_rules.format(
         creative_instruction=creative_instruction + summary_guard + shot_tag_guard + speech_guard,
         char_description=char_description,
@@ -1154,7 +1329,7 @@ def build_and_generate_prompt(kwargs):
     request = sys_inst
     for attempt in range(1, 4):
         response_info = {}
-        raw = call_llm(request, provider, api_key, model_name, temp, response_info=response_info)
+        raw = call_llm(request, provider, api_key, model_name, temp, response_info=response_info, think=False, translation_stage="final_ref_prompt")
         stop_reason = str(response_info.get("stop_reason") or "").rsplit(".", 1)[-1].casefold()
         try:
             if stop_reason in ("length", "max_tokens"):
@@ -1173,7 +1348,7 @@ def build_and_generate_prompt(kwargs):
         else:
             break
     if pending_audio:
-        audio.update(_h3_ref_translate_missing_audio(pending_audio, provider, api_key, model_name))
+        audio.update(_h3_ref_translate_missing_audio(pending_audio, provider, api_key, model_name, think=False))
     prompt_result = _h3_ref_join_audio(core, audio)
     prompt_result = re.sub(
         r"H3SHOTSUBJECTTOKEN([1-5])END",
@@ -1209,7 +1384,9 @@ def build_and_generate_prompt(kwargs):
         named_in_story = re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", story_text, re.I)
         if not named_in_story and str(idx) not in explicit_tags:
             continue
-        pronouns = summary_pronoun_cues(process_wildcards(refs["description"]))
+        explicit_gender = _h3_character_gender(kwargs, idx)
+        pronouns = ({"she/her" if explicit_gender == "female" else "he/him"}
+                    if explicit_gender else summary_pronoun_cues(process_wildcards(refs["description"])))
         if len(pronouns) == 1:
             pronoun = next(iter(pronouns))
             allowed_gendered_pronouns.add(pronoun)
@@ -1266,7 +1443,15 @@ def build_and_generate_prompt(kwargs):
         return re.sub(pattern, lambda m: f"H3SUBJECTTOKEN{m.group(1)}END", body)
 
     def normalize_summary(raw):
-        return protect_subject_tags(restore_marker_variants(clean_summary_translation(raw)))
+        body = protect_subject_tags(restore_marker_variants(clean_summary_translation(raw)))
+        # Recover bare subject references emitted by the translator, not names.
+        # Leave unexpected IDs protected too, so validation still rejects them.
+        if explicit_tags:
+            body = re.sub(
+                r"(?i)(?<![\w<])Subject[ \t]+([1-5])(?![\w>])",
+                lambda m: f"H3SUBJECTTOKEN{m.group(1)}END", body,
+            )
+        return body
 
     def summary_is_valid(body):
         found = set(re.findall(r"H3SUBJECTTOKEN([1-5])END", body))
@@ -1274,8 +1459,14 @@ def build_and_generate_prompt(kwargs):
             return False, "subject markers absent from the source synopsis"
         if re.search(r"(?i)H3SUBJECTTOKEN(?![1-5]END)|<\s*(?:Subject|S)\b", body):
             return False, "malformed subject marker"
-        if not body or body.strip().upper().rstrip(".") in ("N/A", "NONE") or contains_japanese(body) or not explicit_tags.issubset(found):
-            return False, "missing markers or untranslated Japanese"
+        if not body or body.strip().upper().rstrip(".") in ("N/A", "NONE"):
+            return False, "empty summary"
+        if contains_japanese(body):
+            return False, "untranslated Japanese"
+        if not explicit_tags.issubset(found):
+            return False, "missing subject markers: " + ", ".join(sorted(explicit_tags - found))
+        if re.search(r"(?i)\bSubject[ \t]+\d+\b", body):
+            return False, "unrecognized or unexpected bare subject reference"
         if pronoun_hints:
             for pronoun, pattern in pronoun_forms.items():
                 if pronoun not in allowed_gendered_pronouns and re.search(pattern, body, re.I):
@@ -1314,7 +1505,7 @@ def build_and_generate_prompt(kwargs):
             )
         if attempt:
             request += f"\nThe previous answer failed validation ({reason}). Return only a faithful English translation."
-        candidate = normalize_summary(call_llm(request, provider, api_key, model_name, temp=0.2))
+        candidate = normalize_summary(call_llm(request, provider, api_key, model_name, temp=0.2, think=False, translation_stage="summary_repair"))
         valid, reason = summary_is_valid(candidate)
         if valid:
             summary_body = candidate
@@ -1503,7 +1694,7 @@ def build_and_generate_prompt(kwargs):
     quality_text = str(kwargs.get("quality_control", "") or "").strip()
     if quality_text:
         global_constraint = (
-            _h3_translate_retention_style(quality_text, provider, api_key, model_name)
+            _h3_translate_retention_style(quality_text, provider, api_key, model_name, think=False)
             if contains_japanese(quality_text) else quality_text
         )
         retention_lines.append("Global style and prohibitions (user-defined): " + global_constraint)
@@ -1590,7 +1781,7 @@ def build_and_generate_prompt(kwargs):
                     f"Narration: {narration}"
                 )
                 try:
-                    candidate = str(call_llm(request, provider, api_key, model_name, 0.0) or '').strip()
+                    candidate = str(call_llm(request, provider, api_key, model_name, 0.0, think=False, translation_stage="shot_tag_repair") or '').strip()
                     candidate = re.sub(r"H3SHOTSUBJECTTOKEN([1-5])END",
                                        lambda m: f"<Subject {m.group(1)}>", candidate, flags=re.I)
                     candidate = clean_narration(candidate)
@@ -2477,6 +2668,10 @@ def build_h3_base_prompt(kwargs):
         {"slot": idx, "name": item["name"], "kind": item["kind"], "description": item["description"]}
         for idx, item in sorted(definitions.items())
     ]
+    for entry in descriptions:
+        gender = _h3_character_gender(kwargs, entry["slot"])
+        if gender:
+            entry["gender"] = gender
     source_shots = []
     dialogue_expectations = {}
     for shot in shots:
@@ -2513,6 +2708,9 @@ def build_h3_base_prompt(kwargs):
                     .replace("{{INPUT_JSON}}", input_data))
     if has_inline_dialogue:
         instructions += _H3_INLINE_INSTRUCTION
+    gender_context = _h3_gender_context(kwargs)
+    if gender_context:
+        instructions += "\n\n" + gender_context
     provider = kwargs.get("llm_provider", "Ollama (Local)")
     api_key = kwargs.get("llm_api_key", "")
     model = str(kwargs.get("llm_model", "") or "").strip()
@@ -2533,7 +2731,7 @@ def build_h3_base_prompt(kwargs):
                 + "at each character's first source shot.")
             schema = _h3_base_shot_response_schema(len(shots), visible_characters)
         result = call_llm(attempt_instructions, provider, api_key, model, temperature,
-                          json_schema=schema)
+                          json_schema=schema, think=kwargs.get("llm_thinking") == "ON")
         try:
             source = _h3_base_from_structured_shots(result, shots, definitions,
                                                      visible_characters if attempt else None)
@@ -2603,6 +2801,7 @@ def build_h3_base_prompt(kwargs):
 
 def h3_generate_video_prompt(kwargs):
     """Choose the three- or six-section prompt builder for the selected mode."""
+    kwargs = _h3_normalize_input_names(kwargs)
     if h3_generation_mode(kwargs) in _H3_BASE_MODES:
         return build_h3_base_prompt(kwargs)
     return build_and_generate_prompt(kwargs)
@@ -2620,11 +2819,15 @@ def _director_json(raw):
         return json.loads(raw[start:end+1])
 
 
-def _director_llm_input(payload, instructions, temperature=0.35, json_schema=None):
+def _director_llm_input(payload, instructions, temperature=0.35, json_schema=None, *, include_gender=True):
+    if include_gender:
+        gender_context = _h3_gender_context(payload, japanese=True)
+        if gender_context:
+            instructions += "\n\n" + gender_context
     provider = payload.get('llm_provider', 'Ollama (Local)')
     key = payload.get('llm_api_key', '')
     model = payload.get('llm_model', '')
-    return call_llm(instructions, provider, key, model, temp=temperature, json_schema=json_schema)
+    return call_llm(instructions, provider, key, model, temp=temperature, json_schema=json_schema, think=payload.get("llm_thinking") == "ON")
 
 
 _DIRECTOR_LABELS = {
@@ -3001,7 +3204,7 @@ def _prompt_check_combine(deterministic, llm_issues, limit=8):
 @PromptServer.instance.routes.post('/h3/auto_split_story')
 async def handle_auto_split_story(request):
     try:
-        data = await request.json()
+        data = _h3_director_alias_payload(await request.json())
         story = str(data.get('story', '') or '').strip()
         if not story:
             raise ValueError('全体のあらすじを入力してください。')
@@ -3178,7 +3381,7 @@ async def handle_check_generated_prompt(request):
 @PromptServer.instance.routes.post('/h3/interactive_base_generate')
 async def handle_interactive_base_generate(request):
     try:
-        data = await request.json()
+        data = _h3_director_alias_payload(await request.json())
         count = max(1, min(4, int(data.get('shot_count', 4))))
         duration = max(1, min(15, float(data.get('duration', 15))))
         drafts = data.get('shots', [])
@@ -3389,7 +3592,7 @@ def _director_validate_revised_actions(result, current, target, instruction, nam
 @PromptServer.instance.routes.post('/h3/interactive_base_revise')
 async def handle_interactive_base_revise(request):
     try:
-        data = await request.json()
+        data = _h3_director_alias_payload(await request.json())
         current = data.get('shots', [])
         if not isinstance(current, list) or len(current) != 4 or not all(isinstance(s, dict) for s in current):
             raise ValueError('現在のショットが取得できません。')
@@ -3709,7 +3912,7 @@ def build_bulk_storyboard_instruction(story, duration, count, subject_context):
     return "\n".join(lines)
 
 
-def validate_bulk_storyboard_shots(shots, expected_count):
+def validate_bulk_storyboard_shots(shots, expected_count, *, min_action_chars=35, require_camera_keywords=True):
     label = "ベース動画"
     if len(shots) != expected_count or set(shots) != set(range(1, expected_count + 1)):
         return f"{label}のショットが{len(shots)}件です。{expected_count}件の連続したショットが必要です。"
@@ -3720,9 +3923,9 @@ def validate_bulk_storyboard_shots(shots, expected_count):
             return f"{label}のショット{index}に撮影文章がありません。"
         if "この区間で実際に撮影する映像" in action or "アクション描写" in action:
             return f"{label}のショット{index}がテンプレートのままです。"
-        if len(action) < 35:
+        if len(action) < min_action_chars:
             return f"{label}のショット{index}が短すぎます。カメラと具体的な動作を考案してください。"
-        if not re.search(r"カメラ|ショット|構図|視点|俯瞰|煽り|肩越し|背後|正面|横|アップ|クローズ|ズーム|パン|ドリー|追従|旋回|撮影|捉え|映す|接写|固定|引き|寄る|ワイド|camera|close.up|medium shot|wide shot|tracking|angle", action, re.I):
+        if require_camera_keywords and not re.search(r"カメラ|ショット|構図|視点|俯瞰|煽り|肩越し|背後|正面|横|アップ|クローズ|ズーム|パン|ドリー|追従|旋回|撮影|捉え|映す|接写|固定|引き|寄る|ワイド|camera|close.up|medium shot|wide shot|tracking|angle", action, re.I):
             return f"{label}のショット{index}に構図やカメラの指示がありません。"
         if not str(row.get("time", "")).strip():
             return f"{label}のショット{index}に時間指定がありません。"
@@ -3776,6 +3979,519 @@ async def _generate_bulk_storyboard_shots(data, prompt, shot_count, names, sourc
     raise ValueError("旧おまかせの絵コンテ生成が不完全でした（" + feedback + "）。")
 
 
+# Optional Japanese animation direction: creative planning, then timed storyboarding.
+_H3_ANIME_GENRES = ('auto', 'daily', 'comedy', 'gag', 'battle', 'serious', 'emotion', 'romance', 'horror', 'fantasy')
+def _h3_anime_rules(genre):
+    if not isinstance(genre, str) or genre not in _H3_ANIME_GENRES:
+        raise ValueError("演出ジャンルが正しくありません。")
+    folder = os.path.join(os.path.dirname(__file__), "animetion_direction")
+    parts = []
+    for filename in ("common.txt", genre + ".txt"):
+        try:
+            with open(os.path.join(folder, filename), "r", encoding="utf-8") as file:
+                value = file.read().strip()
+        except OSError as exc:
+            raise ValueError("animetion_direction/" + filename + " を配置してください。") from exc
+        if not value:
+            raise ValueError(filename + " が空です。")
+        parts.append(value)
+    return "\n\n".join(parts)
+
+
+def _h3_anime_subject_context(data, names, slots):
+    # Only pass existing settings; never infer relationships from a character's name.
+    entries = []
+    for slot in sorted(slots):
+        enabled = bool(data.get(f"char{slot}_enabled", False))
+        entry = {"tag": f"<subject {slot}>"}
+        if enabled:
+            entry["name"] = names.get(slot, "")
+            entry["extra"] = str(data.get(f"char{slot}_extra", "") or "")[:4000]
+            preset = data.get(f"char{slot}_preset", "None")
+            if isinstance(preset, str) and preset not in ("None", "Custom Text"):
+                if preset in H3PromptDirectorGUI.get_character_files():
+                    path = os.path.join(os.path.dirname(__file__), "characters", preset + ".txt")
+                    try:
+                        with open(path, "r", encoding="utf-8") as file:
+                            entry["description"] = file.read()[:4000]
+                    except OSError:
+                        pass
+        else:
+            entry["kind"] = str(data.get(f"subject_kind_{slot}", "") or "")
+            entry["description"] = str(data.get(f"subject_def_{slot}", "") or "")[:4000]
+        entries.append(entry)
+    return json.dumps({"subjects": entries,
+                       "stage": str(data.get("situation", "") or "")[:4000],
+                       "retention": str(data.get("quality_control", "") or "")[:4000]}, ensure_ascii=False)
+
+
+def _h3_anime_normalize_text(text, names, story, source_slots, allowed_slots):
+    text, slots = _bulk_storyboard_subject_codes(text, names, clean_separators=True)
+    if slots - allowed_slots:
+        raise ValueError("原案・設定にないSubjectタグが含まれています。")
+    if len(source_slots) >= 2:
+        for part in _H3_BULK_QUOTED_TEXT.split(text)[::2]:
+            for match in _H3_BULK_UNMAPPED_PAIR.finditer(part):
+                if all(name not in story for name in match.groups()):
+                    raise ValueError("原案にない人物名のような表記があります: " + match.group())
+    return text, slots
+
+
+def _h3_anime_check_coverage(story, text, source_slots, used_slots):
+    if source_slots - used_slots:
+        raise ValueError("原案のSubjectタグが欠落しています: " + ", ".join(
+            f"<subject {slot}>" for slot in sorted(source_slots - used_slots)))
+    # Keep actual quoted lines verbatim and in order. Do not add dialogue.
+    quote_pattern = r'<d>.*?</d>|「[^」]*」|『[^』]*』'
+    original = re.findall(quote_pattern, story, re.I | re.S)
+    generated = re.findall(quote_pattern, text, re.I | re.S)
+    if original != generated:
+        raise ValueError("原案の引用・セリフが追加、欠落、変更、または順序変更されています。")
+
+
+def _h3_anime_fit_duration_ticks(weights, total_ticks):
+    """Scale the requested relative durations, with a five-tick minimum per shot.
+
+    Integer largest-remainder rounding makes the total exact and deterministic.
+    Preserve valid durations unchanged when their sum is already correct.
+    """
+    minimum = 5
+    if not weights or any(type(w) is not int or w < minimum for w in weights):
+        raise ValueError("各ショットのduration_ticksは5以上の整数（0.1秒単位）にしてください。")
+    if total_ticks < minimum * len(weights):
+        raise ValueError("指定尺にショット数を収められません。")
+    if sum(weights) == total_ticks:
+        return list(weights)
+    fitted = [0] * len(weights)
+    active = list(range(len(weights)))
+    remaining = total_ticks
+    while active:
+        weight_sum = sum(weights[i] for i in active)
+        # Reserve the minimum for any shot that would otherwise be too short.
+        too_short = [i for i in active if remaining * weights[i] < minimum * weight_sum]
+        if too_short:
+            for i in too_short:
+                fitted[i] = minimum
+                remaining -= minimum
+            active = [i for i in active if i not in too_short]
+            continue
+        remainders = {}
+        for i in active:
+            fitted[i], remainders[i] = divmod(remaining * weights[i], weight_sum)
+        extra = remaining - sum(fitted[i] for i in active)
+        for i in sorted(active, key=lambda i: (-remainders[i], i))[:extra]:
+            fitted[i] += 1
+        break
+    return fitted
+
+
+_H3_FREE_HEADER = re.compile(r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?(?:ショット|shot)[ \t]*([0-9０-９]+)[ \t]*(?:[（(]([0-9０-９]+(?:[.．][0-9０-９]+)?)[ \t]*秒[）)])?[ \t]*[:：](?:\*\*)?[ \t]*")
+
+
+def _h3_normalize_decorated_headers(text):
+    parts = _H3_BULK_QUOTED_TEXT.split(text)
+    pattern = re.compile(r"(?im)^([ \t]*(?:#{1,6}[ \t]+|[-*][ \t]+)?)(_{1,2}|\*{1,2})[ \t]*((?:shot|ショット)[ \t]*(?:[0-9０-９]+|[A-Z])(?:[ \t]*[（(][^\n）)]*[）)])?)[ \t]*[:：]?[ \t]*\2[ \t]*[:：]?[ \t]*(?=\n|$)")
+    for i in range(0, len(parts), 2):
+        parts[i] = pattern.sub(lambda m: m.group(1) + m.group(3) + "：", parts[i])
+    return "".join(parts)
+
+
+def _h3_free_warn(message):
+    print(f"[H3 Prompt Director] Anime direction warning: {message}", flush=True)
+
+
+_H3_FREE_SUBJECT_VARIANT = re.compile(
+    r"[<＜]\s*subject[ \t_]+([0-9０-９]+)(?![0-9０-９A-Za-z_])(?:[ \t]*[>＞])?"
+    r"|[<＜]\s*subject\s*[>＞]\s*([0-9０-９]+)(?![0-9０-９])"
+    r"|(?<![A-Za-z0-9_<＜])subject\s*([0-9０-９]+)(?![A-Za-z0-9_>＞])"
+    r"|主体[ \t]+([0-9０-９]+)", re.I)
+
+
+_H3_SUBJECT_TYPO = re.compile(
+    r"[<＜][ \t]*(?:subjects|subjeject|subieect|subieet|subjeet|subect|s[ \t]*u[ \t]*b[ \t]*j[ \t]*e[ \t]*c[ \t]*t)[ \t_]*([0-9０-９]+)(?![0-9０-９A-Za-z_])(?:[ \t]*[>＞〉])?"
+    r"|(?<![A-Za-z0-9_<＜])(?:subect|subjects)[ \t]+([0-9０-９]+)(?![A-Za-z0-9_>＞])", re.I)
+
+
+def _h3_repair_subject_typos(text):
+    parts = _H3_BULK_QUOTED_TEXT.split(text)
+    for i in range(0, len(parts), 2):
+        parts[i] = _H3_SUBJECT_TYPO.sub(
+            lambda m: f"<subject {int(m.group(1) or m.group(2))}>", parts[i])
+    return "".join(parts)
+
+
+def _h3_free_normalize(action, names, allowed_slots):
+    # Remove only known formatting wrappers and isolated trailing angle brackets.
+    parts = _H3_BULK_QUOTED_TEXT.split(action)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"</?(?:b|strong|i|em)\s*>", "", parts[i], flags=re.I)
+    if len(parts) % 2 == 1:
+        parts[-1] = re.sub(r"(?<=[。！？.!?])[ \t]*<[ \t]*$", "", parts[-1])
+    action = _h3_repair_subject_typos("".join(parts))
+    parts = _H3_BULK_QUOTED_TEXT.split(action)
+    for i in range(0, len(parts), 2):
+        parts[i] = _H3_FREE_SUBJECT_VARIANT.sub(
+            lambda m: f"<subject {int(next(g for g in m.groups() if g is not None))}>", parts[i])
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"<\s*(?:Action|Result)\s*(?:>\s*[:：]?|[:：]\s*>?)", "", parts[i], flags=re.I)
+    action, slots = _bulk_storyboard_subject_codes("".join(parts), names, clean_separators=True)
+    if slots - allowed_slots:
+        raise ValueError("原案・設定にないSubjectタグが含まれています。")
+    if re.search(r"[<＜]\s*subject\s*[>＞]", action, re.I):
+        _h3_free_warn("番号のないSubject表記があります。人物を推測せず原文を維持します。")
+    return action, slots
+
+
+def _h3_free_camera_warnings(action, index):
+    """Advisory keyword checks only; never rewrite or reject a shot."""
+    checks = {
+        "ショットサイズ": r"全体カメラ|中近接|近接ショット|中距離|全景|遠景|中景|近景|中近景|中遠景|全身|バスト|腰上|膝上|寄り|引き画|ロング|ミディアム|ワイド|クローズ|アップ|接写|特写|広角|(?:wide|medium|long|full|close[- ]?up|establishing)\s*(?:shot)?",
+        "カメラアングル": r"仰角|俯角|フラットなアングル|微傾斜アングル|俯瞰|鳥瞰|煽り|あおり|見上げ|見下ろ|目線の高さ|目の高さ|アイレベル|水平|正面|斜め|側面|真横|背後|肩越し|サイドアングル|フロントアングル|リアアングル|トップアングル|サイドビュー|フロントビュー|側方から|斜め前から|斜め後ろから|ローアングル|ハイアングル|低アングル|高アングル|低角度|高角度|低い位置|高い位置|横から|前方から|後方から|上方から|下方から|主観|視点|(?:low|high|eye.level|side|front|overhead)\s*(?:angle|view)",
+        "カメラワーク": r"手持ちカメラ|手振れ|手ブレ|手ぶれ|プッシュイン|プルアウト|スローアウト|固定|静止|据え置|パン(?:ニング|撮影|する|し|で|アップ|ダウン|を施|を行|[、。と])|ティルト|チルト|ドリー|ズーム|トラック|トラッキング|追従|追尾|回り込|旋回|カメラ[^。\n]{0,24}(?:追う|追い|寄る|寄せ|引く|引き|移動|揺れ|動か|止め|静止)|(?:static|locked.off|tracking|dolly|zoom|tilt|pan)\b",
+        "画面内の配置": r"画面(?:の)?(?:左|右|中央|手前|奥|端|上|下)|フレーム(?:の)?(?:左|右|中央|手前|奥)|前景|後景|背景に|中央に|左右に|左側|右側|左に|右に|手前に|奥に|配置|二人を(?:同じ|一つの)画面|(?:screen|frame)\s*(?:left|right|center)|foreground|background",
+    }
+    missing = [label for label, pattern in checks.items() if not re.search(pattern, action, re.I)]
+    if missing:
+        _h3_free_warn(f"ショット{index}の撮影情報を確認してください（記述を検出できない項目: {'、'.join(missing)}）。本文を維持します。")
+
+
+def _h3_free_parse(raw, duration, names, story, source_slots, allowed_slots, expected_count=None):
+    raw = raw.strip()
+    if raw.startswith("```") and raw.endswith("```"):
+        raw = re.sub(r"^```[^\n]*\n|\n```$", "", raw).strip()
+    raw = _h3_normalize_decorated_headers(raw)
+    parts = _H3_BULK_QUOTED_TEXT.split(raw)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"[<＜][ \t]*(?:shot|ショット)[ \t]*([0-9０-９]+)[ \t]*(?:[>＞][ \t]*[:：]?|[:：][ \t]*[>＞]?)", lambda m: f"\nショット{int(m.group(1))}：", parts[i], flags=re.I)
+        parts[i] = re.sub(r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?[【\[]\s*(?:shot|ショット)[ \t]*([0-9０-９]+)[ \t]*[】\]][ \t]*(?:[:：])?(?:\*\*)?", lambda m: f"ショット{int(m.group(1))}：", parts[i])
+    raw = "".join(parts)
+    # Ignore header-like text inside dialogue, retaining original offsets.
+    masked = "".join(part if i % 2 == 0 else re.sub(r"[^\n]", "\ufffc", part) for i, part in enumerate(_H3_BULK_QUOTED_TEXT.split(raw)))
+    headers = list(_H3_FREE_HEADER.finditer(masked))
+    max_shots = min(4, duration * 2)
+    if not headers or not 1 <= len(headers) <= max_shots:
+        raise ValueError("有効なショット見出しを抽出できないか、指定尺に収まるショット数を超えています。")
+    if raw[:headers[0].start()].strip():
+        _h3_free_warn("ショット前の前置きを除去しました。")
+    if expected_count is not None and len(headers) != expected_count:
+        raise ValueError(f"指定{expected_count}ショットに対し{len(headers)}ショットしか正しく分割できませんでした。")
+    shots, slots, weights = {}, set(), []
+    for i, header in enumerate(headers, 1):
+        if int(header.group(1)) != i:
+            raise ValueError("ショット番号は1から連続させてください。")
+        action = raw[header.end():headers[i].start() if i < len(headers) else len(raw)].strip()
+        action, used = _h3_free_normalize(action, names, allowed_slots)
+        if not action or action in ("（演出文章）", "(演出文章)"):
+            raise ValueError(f"ショット{i}の本文がありません。")
+        if re.search(r"</?think>|```", action, re.I):
+            raise ValueError("ショット本文に思考過程やコードブロックが混入しています。")
+        if len(action) < 20 or not contains_japanese(action):
+            _h3_free_warn(f"ショット{i}の文章量または日本語表記を確認してください。")
+        _h3_free_camera_warnings(action, i)
+        slots.update(used)
+        weights.append(max(5, round(float(header.group(2).replace("．", ".")) * 10)) if header.group(2) else 10)
+        shots[i] = {"action": action}
+    if any(header.group(2) is None for header in headers):
+        weights = [10] * len(headers)
+    ticks = _h3_anime_fit_duration_ticks(weights, duration * 10)
+    elapsed = 0
+    for i, tick in enumerate(ticks, 1):
+        shots[i]["time"] = f"{bulk_storyboard_timecode(elapsed/10)}-{bulk_storyboard_timecode((elapsed+tick)/10)}"
+        elapsed += tick
+    if source_slots - slots:
+        _h3_free_warn("原案のSubjectタグが欠落しています: " + ", ".join(
+            f"<subject {slot}>" for slot in sorted(source_slots - slots)))
+    quote_pattern = r'<d>.*?</d>|「[^」]*」|『[^』]*』'
+    original = re.findall(quote_pattern, story, re.I | re.S)
+    generated = re.findall(quote_pattern, "\n".join(row["action"] for row in shots.values()), re.I | re.S)
+    if not original and generated:
+        _h3_free_warn("原案に明示的な引用・セリフがないのに生成文に引用があります。追加発声の可能性を確認してください。")
+    elif original != generated:
+        _h3_free_warn("原案と引用・セリフが異なります（演出用語の引用を含む場合があります）。本文を維持します。")
+    return shots
+
+
+def _h3_baseline_prompt(story, duration, count, data=None, source_slots=None):
+    context = _h3_gender_context(data or {}, japanese=True, slots=source_slots)
+    character_info = context + "\n\n" if context else ""
+    story = re.sub(r"<subject ([1-5])>", r"<Subject \1>", story, flags=re.I)
+    headers = "\n\n".join(f"ショット{i}：\n（演出文章）" for i in range(1, count + 1))
+    return f"""あなたは日本の商業アニメーションの演出家兼絵コンテ作家です。
+
+以下の原案を基に、{duration}秒間の日本の手描き2Dアニメーションの絵コンテを{count}ショットで考案してください。
+
+各ショットは約{duration / count:.3g}秒です。原案の出来事を順番通りに配分し、時間内に収まる魅力的な演出を考案してください。
+
+【撮影と芝居】
+各ショットの冒頭の一文に、ショットサイズ、カメラアングル、画面内の人物（または被写体）の配置、カメラワーク（固定も含む）を具体的に記述してください。
+続けて、画面に映る動作、表情、視線、仕草を時系列に沿って描写してください。必要に応じて予備動作、重心移動、リアクション、タメ、集中線、インパクトフレームを補完してください。
+
+【原案の維持】
+全出来事の主体・対象・役割・動作・方向・強度・結果・順序・結末を維持してください。武器の所有者と状態を維持し、必要な持ち替えを描写してください。人物は原案と同じSubjectコードを使い、名前・性別・年齢は原案と設定に従ってください。セリフ・発声は原案にあるものだけを使ってください。
+
+【出力】
+完成した映像を直接描写する自然な日本語にしてください。各ショットは前の続きとし、同じ動作を繰り返さないでください。演出意図の解説、JSON、項目ラベル、前置きは不要です。ショット見出しと本文のみ出力してください。
+
+{character_info}【原案】
+
+{story}
+
+【出力形式】
+
+{headers}"""
+
+
+def _h3_dialogue_instruction(story):
+    # Unquoted speech can exist; do not suppress it solely because quotes are absent.
+    if re.search(r'<d>|「|『|"|セリフ|台詞|発声|叫|話[すし]|会話|談笑|言[ういっ]|呟|つぶや|囁|ささや|声|歌[ういっ]|挨拶|返事|呼びかけ|悲鳴|掛け声|口ずさ|笑い声|しゃべ|喋|語[るり]|質問|答[ええ]|説明|告[げぐ]|尋[ね]', story, re.I):
+        return "セリフ・発声は原案の指定だけを維持し、新しく創作しないでください。"
+    return "全編セリフ・発声なし（効果音は別）。感情は表情・視線・仕草で示し、仮のセリフや心の声も書かないでください。"
+
+
+_H3_DESIGN_HEADER = re.compile(
+    r"(?im)^[ \t]*(?:[-*][ \t]+|#{1,6}[ \t]+)?(?:\*\*)?(?:[<＜【\[])?(?:ショット|shot)[ \t]*([0-9０-９]+|[A-Z])(?:[ \t]*[（(][^\n）)]*[）)])?[ \t]*(?:[>＞】\]][ \t]*)?(?:\*\*)?[ \t]*[:：]?(?:\*\*)?[ \t]*(?=\n|$|[^0-9０-９A-Za-z])")
+
+
+def _h3_validate_design_memo(memo, count, names, allowed_slots):
+    memo = memo.strip()
+    if memo.startswith("```") and memo.endswith("```"):
+        memo = re.sub(r"^```[^\n]*\n|\n```$", "", memo).strip()
+    memo = _h3_normalize_decorated_headers(memo)
+    # Bare numeric headings are safe only on their own line before a field.
+    parts = _H3_BULK_QUOTED_TEXT.split(memo)
+    for j in range(0, len(parts), 2):
+        parts[j] = re.sub(r"(?m)^[ \t]*([0-9０-９]+)[ \t]*[:：]?[ \t]*\n(?=[ \t]*(?:原案|撮影|芝居|芝稽|追加演出|演出補足|予備動作|リアクション)[ \t]*[:：])", r"ショット\1：\n", parts[j])
+        parts[j] = re.sub(r"(?m)^([ \t]*)芝稽(?=[ \t]*[:：])", r"\1芝居", parts[j])
+    memo = "".join(parts)
+    masked = "".join(part if i % 2 == 0 else re.sub(r"[^\n]", "\ufffc", part)
+                     for i, part in enumerate(_H3_BULK_QUOTED_TEXT.split(memo)))
+    headers = list(_H3_DESIGN_HEADER.finditer(masked))
+    if len(headers) != count:
+        raise ValueError(f"演出設計メモのショット数が不一致です（指定{count}、検出{len(headers)}）。")
+    ids = [h.group(1).upper() for h in headers]
+    valid = (all(x.isdecimal() for x in ids) and
+             [int(x) for x in ids] in (list(range(1, count+1)), list(range(count)))) or ids == [chr(65+i) for i in range(count)]
+    if not valid:
+        raise ValueError("演出設計メモのショット番号が連続していません。")
+    result = []
+    for i, h in enumerate(headers, 1):
+        body = memo[h.end():headers[i].start() if i < count else len(memo)].strip()
+        if not body or re.search(r"</?think>|```", body, re.I):
+            raise ValueError(f"演出設計メモのショット{i}の本文が不正です。")
+        body, _ = _h3_free_normalize(body, names, allowed_slots)
+        result.append(f"ショット{i}：\n{body}")
+    return "\n\n".join(result)
+
+
+def _h3_design_prompt(story, duration, count, data, source_slots):
+    context = _h3_gender_context(data, japanese=True, slots=source_slots or None)
+    headers = "\n\n".join(f"ショット{i}：\n原案：（担当する原文の抜粋）\n撮影：（サイズ・角度・配置・動き）\n追加演出：（表情・仕草・予備動作）" for i in range(1, count + 1))
+    return f"""日本の手描き2Dアニメの演出設計メモを作成してください。
+全{duration}秒、連続する{count}ショット。各約{duration / count:.3g}秒。
+原案の文章を順番に各ショットへ配分し、「原案」欄に書き換えず抜粋してください。出来事を省略・重複させないでください。撮影と追加演出だけを考案してください。
+{_h3_dialogue_instruction(story)}
+人物は原案のSubjectタグをそのまま使用してください。撮影は4項目を短く列挙し、追加演出は原案の動作を変えず表情・視線・仕草・必要な持ち替えを1〜2文で補完してください。選択肢や比喩的なセリフ、演出意図の説明は不要です。
+見出しは1から{count}まで、各1回だけ。前置きや解説は不要です。
+{context}
+【原案】
+{story}
+【出力形式】
+{headers}"""
+
+
+def _h3_ultra_partition(story, count):
+    # Keep exact source slices; never split dialogue or tags.
+    protected = [(m.start(), m.end()) for m in _H3_BULK_QUOTED_TEXT.finditer(story)]
+    protected += [(m.start(), m.end()) for m in re.finditer(r"<[^<>]*>", story)]
+    candidates = [(m.end(), 0 if m.group() in "。！？\n" else 1)
+                  for m in re.finditer(r"[。！？\n、]", story)
+                  if not any(a < m.end() < b for a, b in protected)
+                  and story[:m.end()].strip() and story[m.end():].strip()]
+    # Prefer sentence boundaries, but allow clauses when necessary.
+    cuts = []
+    last = 0
+    for i in range(1, count):
+        remaining = count - i - 1
+        options = [(pos, penalty) for pos, penalty in candidates if pos > last]
+        if not options:
+            cuts.append(len(story))
+            last = len(story)
+            continue
+        viable = options[:max(1, len(options)-remaining)]
+        pos, _ = min(viable, key=lambda x: abs(x[0]-len(story)*i/count) + x[1]*len(story)*0.08)
+        cuts.append(pos)
+        last = pos
+    bounds = [0] + cuts + [len(story)]
+    return [story[a:b] for a,b in zip(bounds,bounds[1:])]
+
+
+def _h3_ultra_prompt(story, duration, count, data, source_slots):
+    context = _h3_gender_context(data, japanese=True, slots=source_slots or None)
+    chunks = _h3_ultra_partition(story, count)
+    assigned = "\n\n".join(f"ショット{i}：{chunk.strip() or '（前の動作の余韻）'}" for i,chunk in enumerate(chunks,1))
+    headers = "\n\n".join(f"ショット{i}：\n撮影：\n演出補足：" for i in range(1,count+1))
+    return f"""日本の手描き2Dアニメの演出を全{duration}秒、{count}ショット（各約{duration/count:.3g}秒）で考案してください。
+下記の原案は配分済みです。原案を出力せず、各ショットの撮影と演出補足だけを書いてください。
+撮影は自然なカメラ演出を短く記述してください。演出補足は表情・視線・仕草・タメ・緩急・エフェクトなどを自由に工夫してください。不要ならなし。
+原案の出来事や人物の役割を変えず、人物はSubjectタグで記述してください。動作を補う場合は「打撃前」「直後」など原案との時間関係が分かるように書いてください。
+{_h3_dialogue_instruction(story)}
+{context}
+【配分済み原案】
+{assigned}
+【出力形式】
+{headers}"""
+
+
+def _h3_ultra_join(memo, count, story):
+    parts = _H3_BULK_QUOTED_TEXT.split(memo)
+    memo = "".join(p.replace(r"\n", "\n") if i%2==0 else p for i,p in enumerate(parts))
+    masked = "".join(p if i%2==0 else re.sub(r"[^\n]", "\ufffc", p) for i,p in enumerate(_H3_BULK_QUOTED_TEXT.split(memo)))
+    headers = list(_H3_DESIGN_HEADER.finditer(masked))
+    if len(headers) != count:
+        raise ValueError("超高速モードのショット数が不正です。")
+    chunks = _h3_ultra_partition(story, count)
+    result = []
+    absent = ("", "なし", "無し", "不要", "なし。", "無し。", "不要。")
+    for i,h in enumerate(headers,1):
+        end = headers[i].start() if i<count else len(memo)
+        body = memo[h.end():end]
+        fields = list(re.finditer(r"(撮影|演出補足|追加演出|予備動作|原案|リアクション)[ \t]*[:：][ \t]*", masked[h.end():end]))
+        values = {}
+        for j,f in enumerate(fields):
+            key = "演出補足" if f.group(1) == "追加演出" else f.group(1)
+            v = body[f.end():fields[j+1].start() if j+1<len(fields) else len(body)].strip()
+            if key == "原案":
+                continue  # Never trust a model's copy of the source.
+            if key in values:
+                continue
+            # Reject ambiguous angle tags without guessing the intended person.
+            unquoted = "".join(_H3_BULK_QUOTED_TEXT.split(v)[::2])
+            if re.search(r"[<＜>＞]", re.sub(r"<subject [1-5]>", "", unquoted, flags=re.I)):
+                _h3_free_warn(f"超高速ショット{i}の{key}に不明なタグがあるため、その追加演出を除外しました。")
+                v = ""
+            if v not in absent:
+                values[key] = v
+        if values.get("撮影", "") in absent:
+            _h3_free_warn(f"超高速ショット{i}の撮影が欠落または不正です。原案を維持します。")
+        extra = lambda key: values.get(key, "") if values.get(key, "") not in absent else ""
+        action = "\n".join(v for v in (extra("撮影"), extra("予備動作"), chunks[i-1], extra("リアクション"), extra("演出補足")) if v.strip())
+        if not action.strip():
+            raise ValueError(f"超高速モードのショット{i}に原案も追加演出もありません。")
+        result.append(f"ショット{i}：\n{action}")
+    return "\n\n".join(result)
+
+
+def _h3_render_design_prompt(story, duration, count, data, source_slots, memo):
+    context = _h3_gender_context(data, japanese=True, slots=source_slots or None)
+    headers = "\n\n".join(f"ショット{i}：\n（演出文章）" for i in range(1, count + 1))
+    return f"""以下の演出設計メモを、全{duration}秒・{count}ショットの映像描写に文章化してください。
+各ショットの原案欄の動作に撮影と追加演出を統合してください。原案欄も誤ることがあるため、下の【原案】全文を正とし、主体・対象・手段・結果・順序を維持してください。矛盾する追加演出は採用しないでください。
+各ショットの冒頭にサイズ、角度、配置、カメラの動きを記述し、続けて画面に映る動作と表情を時系列で直接描写してください。
+人物は原案のSubjectタグで記述してください。{_h3_dialogue_instruction(story)}
+原案にない出来事は追加せず、自然な日本語で記述してください。見出しは1から{count}まで各1回。説明や箇条書きは不要です。
+{context}
+【原案】
+{story}
+【演出設計メモ】
+{memo}
+【出力形式】
+{headers}"""
+
+
+def _h3_log_ollama_thinking(result, thinking, content):
+    thinking = str(thinking or "")
+    content = str(content or "")
+    print(f"[H3 Prompt Director] LLM thinking chars: {len(thinking)}", flush=True)
+    print(f"[H3 Prompt Director] LLM thinking: {thinking}", flush=True)
+    print(f"[H3 Prompt Director] LLM answer chars: {len(content)}", flush=True)
+    print(f"[H3 Prompt Director] LLM answer: {content}", flush=True)
+    print(f"[H3 Prompt Director] LLM done_reason: {result.get('done_reason')}", flush=True)
+
+
+def _h3_baseline_llm(data, prompt, *, think_override=None, stage="baseline"):
+    provider = data.get("llm_provider", "Ollama (Local)")
+    model = str(data.get("llm_model") or "").strip()
+    print(f"[H3 Prompt Director] Baseline provider: {provider}", flush=True)
+    print(f"[H3 Prompt Director] LLM input prompt: {prompt}", flush=True)
+    if provider != "Ollama (Local)":
+        print("[H3 Prompt Director] Baseline: non-Ollama provider; existing API settings retained", flush=True)
+        return _director_llm_input(data, prompt, include_gender=False)
+    model = model or "qwen2.5:7b-instruct-q5_K_M"
+    # Chat endpoint mirrors the interactive CLI's user-message format.
+    think = data.get("llm_thinking") == "ON" if think_override is None else think_override
+    print(f"[H3 Prompt Director] LLM stage: {stage}", flush=True)
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
+               "stream": False, "think": think}
+    print(f"[H3 Prompt Director] LLM model: {model}", flush=True)
+    if think:
+        payload["options"] = {"num_ctx": 16384, "num_predict": 12288}
+    if stage in ("design", "render"):
+        payload["options"] = {"num_ctx": 16384, "num_predict": 12288}
+    print(f"[H3 Prompt Director] LLM options: {payload.get('options', 'model defaults')}; think={think}; endpoint=/api/chat", flush=True)
+    started = time.perf_counter()
+    response = requests.post("http://localhost:11434/api/chat", json=payload, timeout=1800 if think else 900)
+    response.raise_for_status()
+    result = response.json()
+    for key in ("model", "prompt_eval_count", "eval_count", "done_reason"):
+        print(f"[H3 Prompt Director] LLM {key}: {result.get(key)}", flush=True)
+    print(f"[H3 Prompt Director] LLM {stage} wall_seconds: {time.perf_counter() - started:.3f}", flush=True)
+    for key in ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration"):
+        value = result.get(key)
+        if isinstance(value, (int, float)):
+            print(f"[H3 Prompt Director] LLM {stage} {key}_seconds: {value / 1e9:.3f}", flush=True)
+    message = result.get("message") or {}
+    raw = str(message.get("content") or "").strip()
+    if think:
+        _h3_log_ollama_thinking(result, message.get("thinking"), raw)
+    print(f"[H3 Prompt Director] LLM raw response: {raw}", flush=True)
+    if result.get("done_reason") == "length":
+        raise ValueError("Ollamaの出力が生成上限に達しました。LLMログを確認してください。")
+    if not raw:
+        raise ValueError(f"Ollamaの回答が空です（{stage}）。")
+    return raw
+
+
+async def _generate_anime_storyboard(data, story, duration, names, source_slots, allowed_slots, genre="auto"):
+    if data.get("llm_provider", "Ollama (Local)") == "Ollama (Local)":
+        data = {**data, "llm_thinking": "ULTRA"}
+    count = min(4, duration * 2)
+    prompt = _h3_baseline_prompt(story, duration, count, data, source_slots or None)
+    print(f"[H3 Prompt Director] Baseline: {count} shots; genre rules and editorial review bypassed", flush=True)
+    if data.get("llm_provider", "Ollama (Local)") == "Ollama (Local)" and data.get("llm_thinking") in ("ON", "FAST", "ULTRA"):
+        ultra = data.get("llm_thinking") == "ULTRA"
+        design_think = data.get("llm_thinking") == "ON"
+        started = time.perf_counter()
+        print("[H3 Prompt Director] Anime direction: ultra design OFF / Python join" if ultra else f"[H3 Prompt Director] Anime direction: two-stage design {'ON' if design_think else 'OFF'} / render OFF", flush=True)
+        try:
+            memo = await asyncio.to_thread(_h3_baseline_llm, data, (_h3_ultra_prompt if ultra else _h3_design_prompt)(story, duration, count, data, source_slots), think_override=design_think, stage="design")
+            try:
+                memo = _h3_validate_design_memo(memo, count, names, allowed_slots)
+            except ValueError as exc:
+                print(f"[H3 Prompt Director] Anime design rejected: {exc}", flush=True)
+                raise
+            print(f"[H3 Prompt Director] Anime design memo: {memo}", flush=True)
+            if ultra:
+                try:
+                    raw = _h3_ultra_join(memo, count, story)
+                except ValueError as exc:
+                    print(f"[H3 Prompt Director] Anime ultra rejected: {exc}", flush=True)
+                    raise
+            else:
+                raw = await asyncio.to_thread(_h3_baseline_llm, data, _h3_render_design_prompt(story, duration, count, data, source_slots, memo), think_override=False, stage="render")
+        finally:
+            print(f"[H3 Prompt Director] Anime {'ultra' if ultra else 'two-stage'} wall_seconds: {time.perf_counter() - started:.3f}", flush=True)
+    else:
+        raw = await asyncio.to_thread(_h3_baseline_llm, data, prompt)
+    print(f"[H3 Prompt Director] Anime direction baseline raw: {raw}", flush=True)
+    try:
+        shots = _h3_free_parse(raw, duration, names, story, source_slots, allowed_slots, count)
+    except ValueError as exc:
+        print(f"[H3 Prompt Director] Anime direction rejected: {exc}", flush=True)
+        raise
+    print(f"[H3 Prompt Director] Anime direction final shots: {json.dumps(shots, ensure_ascii=False)}", flush=True)
+    return shots
+
+
 @PromptServer.instance.routes.post("/h3/generate_auto_scenario")
 async def handle_generate_auto_scenario(request):
     try:
@@ -3803,18 +4519,24 @@ async def handle_generate_auto_scenario(request):
                     configured_slots.add(index)
             if name:
                 names[index] = name
+        names = _h3_input_names(data)
         story, source_slots = _bulk_storyboard_subject_codes(story.strip(), names)
         if source_slots - set(range(1, 6)):
             raise ValueError("原案のSubjectタグは <subject 1>〜<subject 5> を使用してください。")
         allowed_slots = configured_slots | source_slots
         subject_context = "、".join(f"<subject {slot}>" for slot in sorted(allowed_slots))
+        if auto_data.get("animeDirection", False) is True:
+            print("[H3 Prompt Director] Anime direction: scenario generation requested")
+            base_shots = await _generate_anime_storyboard(data, story, duration, names, source_slots, allowed_slots, auto_data.get("animeGenre", "auto"))
+            print(f"[H3 Prompt Director] Anime director scenario: base_shots={len(base_shots)}")
+            return web.json_response({"success": True, "base_shots": base_shots, "overall_story": story})
         shot_count = bulk_storyboard_shot_count(duration)
         prompt = build_bulk_storyboard_instruction(story, duration, shot_count, subject_context)
         base_shots = await _generate_bulk_storyboard_shots(
             data, prompt, shot_count, names, story, source_slots, allowed_slots
         )
         print(f"[H3 Prompt Director] Bulk director scenario: base_shots={len(base_shots)}")
-        return web.json_response({"success": True, "base_shots": base_shots})
+        return web.json_response({"success": True, "base_shots": base_shots, "overall_story": story})
     except Exception as exc:
         return web.json_response({"success": False, "error": str(exc) + " 既存のショットは変更していません。"}, status=500)
 
@@ -3823,7 +4545,7 @@ async def handle_generate_auto_scenario(request):
 async def handle_generate_prompt(request):
     ollama_model_to_unload = ""
     try:
-        data = await request.json()
+        data = _h3_normalize_input_names(await request.json())
         
         target_clip = str(data.get("target_clip", ""))
         base_locked = data.get("base_locked", False)
@@ -4226,7 +4948,7 @@ class H3PromptDirectorGUI:
                 "ambient_sound": ("STRING", {"multiline": True, "default": ""}),
                 "bgm": ("STRING", {"multiline": True, "default": ""}),
                 "timeline_data": ("STRING", {"default": '{"items":[]}'}),
-                "auto_data": ("STRING", {"default": '{"directorMode":"detailed", "overwrite":false, "chars":["S1"], "duration":5, "story":""}'}),
+                "auto_data": ("STRING", {"default": '{"directorMode":"detailed", "overwrite":false, "animeDirection":false, "chars":["S1"], "duration":5, "story":""}'}),
                 "clips_data_json": ("STRING", {"default": "{}"}),
                 
                 "char1_enabled": ("BOOLEAN", {"default": True}),
@@ -4303,6 +5025,12 @@ class H3PromptDirectorGUI:
         
         inputs["required"]["generation_mode"] = (["REF2VA/HYBRID", "FL2VA", "I2VA", "T2VA"], {"default": "REF2VA/HYBRID"})
 
+        for i in range(1, 6):
+            inputs["required"][f"char{i}_alias"] = ("STRING", {"default": ""})
+        # Append only, preserving the widget positions of older workflows.
+        for i in range(1, 6):
+            inputs["required"][f"char{i}_gender"] = (["未指定", "男性", "女性"], {"default": "未指定"})
+        inputs["required"]["llm_thinking"] = (["OFF", "ON", "FAST", "ULTRA"], {"default": "ULTRA"})
         return inputs
         
     @classmethod
@@ -4315,6 +5043,7 @@ class H3PromptDirectorGUI:
     CATEGORY = "MiniMax_H3"
 
     def process_studio(self, **kwargs):
+        kwargs = _h3_normalize_input_names(kwargs)
         use_custom = kwargs.get("use_custom_prompt", False)
         custom_txt = kwargs.get("custom_prompt", "").strip()
 
